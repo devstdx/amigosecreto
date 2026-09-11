@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Panel del anfitrión · Amigo Secreto</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <!-- ============================== LOGIN ============================== -->
+      <section id="view-login">
+        <h1>Panel del anfitrión</h1>
+        <p class="muted">Introduce la contraseña para gestionar el sorteo.</p>
+        <div class="card">
+          <label for="pw">Contraseña</label>
+          <input id="pw" type="password" autocomplete="current-password" placeholder="••••••" />
+          <button type="button" id="login-btn" class="btn">Entrar</button>
+        </div>
+        <p id="login-error" class="alert hidden"></p>
+        <p class="footer"><a href="/">← Ir a la vista de jugador</a></p>
+      </section>
+
+      <!-- ============================== PANEL ============================== -->
+      <section id="view-panel" class="hidden">
+        <div class="head">
+          <h1>Anfitrión</h1>
+          <span id="state-badge" class="badge">…</span>
+        </div>
+
+        <div class="card">
+          <p class="stat">
+            En la sala: <b id="stat-total">0</b> ·
+            con amigo asignado: <b id="stat-assigned">0</b> ·
+            mínimo para sortear: <b id="stat-min">2</b> ·
+            ronda <b id="stat-round">1</b>
+          </p>
+          <button type="button" id="draw-btn" class="btn" disabled>Sortear a todos</button>
+          <p class="muted" id="draw-note">Esperando jugadores…</p>
+          <p id="draw-error" class="alert hidden"></p>
+          <div class="row">
+            <button type="button" id="reset-btn" class="btn ghost">Reiniciar ronda</button>
+            <button type="button" id="matrix-btn" class="btn ghost">Ver matriz</button>
+          </div>
+          <div class="row">
+            <button type="button" id="copy-btn" class="btn ghost">Copiar enlace</button>
+            <button type="button" id="logout-btn" class="btn ghost">Salir</button>
+          </div>
+          <p class="muted mono" id="share-url"></p>
+        </div>
+
+        <div class="card">
+          <div class="head">
+            <h2>Personas conectadas</h2>
+            <span class="stat" id="clock"></span>
+          </div>
+          <ul class="list" id="players"></ul>
+          <p class="muted" id="empty-note">Nadie todavía. Comparte el enlace para que entren.</p>
+        </div>
+
+        <div id="matrix-card" class="card hidden">
+          <h2>Matriz del sorteo (auditoría)</h2>
+          <p class="stat" id="matrix-summary"></p>
+          <p class="pre mono" id="matrix-list"></p>
+          <button type="button" id="matrix-close" class="btn ghost">Cerrar matriz</button>
+        </div>
+
+        <p class="footer"><a href="/" target="_blank" rel="noopener">Ver la vista de jugador ↗</a></p>
+      </section>
+    </div>
+
+    <script src="/admin.js" defer></script>
+  </body>
+</html>

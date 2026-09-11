@@ -1,0 +1,23 @@
+# Amigo Secreto — variables de entorno (LOCAL)
+# Copia este archivo a .dev.vars para `wrangler pages dev`.
+# .dev.vars está en .gitignore: NUNCA se sube al repositorio.
+
+# --- Base de datos (Upstash Redis, plan gratuito: 500K comandos/mes) ---
+# Consola: https://console.upstash.com → tu base → "REST" → copia URL y token.
+UPSTASH_REDIS_REST_URL="https://tu-base.upstash.io"
+UPSTASH_REDIS_REST_TOKEN="tu-token-rest"
+
+# --- Panel de administración (/admin) ---
+# ADMIN_PASSWORD es la contraseña que escribirás en el panel.
+ADMIN_PASSWORD="cambia-esta-contraseña"
+# ADMIN_SECRET firma las cookies (admin y sesión del jugador). Cadena larga y aleatoria.
+# Genera una con:  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+ADMIN_SECRET="cadena-larga-y-aleatoria-de-al-menos-32-caracteres"
+
+# --- Opcionales ---
+# ROOM_ID="main"        # id de la sala única
+# ROOM_TTL_DAYS="30"    # días que sobrevive el estado sin actividad
+
+# --- Solo para pruebas locales sin Upstash (ver tools/mock-upstash.mjs) ---
+# UPSTASH_REDIS_REST_URL="http://127.0.0.1:9999"
+# UPSTASH_REDIS_REST_TOKEN="mock-token"

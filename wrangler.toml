@@ -1,0 +1,16 @@
+# ============================================================================
+#  Cloudflare Pages — proyecto de Amigo Secreto (sala única)
+# ============================================================================
+#  Desplegar:  npx wrangler pages deploy public --project-name amigo-secreto
+#  En local:   npx wrangler pages dev public
+#
+#  Los secretos NO van aquí: van en .dev.vars (local) y en
+#  `npx wrangler pages secret put` o el dashboard (producción).
+# ============================================================================
+
+name = "amigo-secreto"
+compatibility_date = "2026-09-01"
+pages_build_output_dir = "public"
+
+# Nota: este proyecto no usa `nodejs_compat` porque el backend solo emplea
+# `fetch` y Web Crypto (nada de node:*), lo que reduce el tamaño y el arranque.

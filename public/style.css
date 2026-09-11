@@ -1,0 +1,153 @@
+/* ============================================================================
+   Amigo Secreto — hoja de estilos BLANCO Y NEGRO, móvil primero
+   Sin frameworks, sin `dvh`, sin `backdrop-filter`, con prefijos -webkit-:
+   funciona en cualquier WebView (iOS 10+ / Android 5+).
+   ============================================================================ */
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html { background: #000; }
+
+body {
+  margin: 0;
+  background: #000;
+  color: #fff;
+  font-family: system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+}
+
+.wrap {
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 18px 16px 40px;
+  min-height: 100vh;
+  display: -webkit-box; display: -webkit-flex; display: flex;
+  -webkit-box-orient: vertical; -webkit-flex-direction: column; flex-direction: column;
+  -webkit-box-pack: center; -webkit-justify-content: center; justify-content: center;
+}
+
+.hidden { display: none !important; }
+.mt { margin-top: 18px; }
+
+h1 { font-size: 1.5rem; margin: 0 0 6px; letter-spacing: .5px; text-align: center; }
+h2 { font-size: 1.1rem; margin: 0 0 10px; text-align: center; }
+p { margin: 8px 0; }
+.muted { color: #a3a3a3; font-size: .88rem; text-align: center; }
+
+.card { border: 1px solid #333; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+
+label {
+  display: block; font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+  color: #a3a3a3; margin-bottom: 8px;
+}
+
+input[type="text"], input[type="password"], input[type="search"] {
+  width: 100%; padding: 15px; font-size: 1.05rem; font-weight: 700;
+  color: #fff; background: #111; border: 2px solid #333; border-radius: 10px;
+  outline: none; font-family: inherit;
+}
+input:focus { border-color: #fff; }
+
+.btn {
+  display: block; width: 100%; padding: 17px; margin-top: 12px;
+  font-size: 1.02rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase;
+  color: #000; background: #fff; border: 2px solid #fff; border-radius: 10px;
+  cursor: pointer; font-family: inherit;
+}
+.btn:active { -webkit-transform: scale(.99); transform: scale(.99); }
+.btn[disabled] { opacity: .4; cursor: default; }
+.btn.ghost { color: #fff; background: transparent; border-color: #555; font-weight: 600; text-transform: none; letter-spacing: 0; }
+.btn.danger { color: #fff; background: #1a1a1a; border-color: #666; font-size: .82rem; padding: 10px; }
+.btn.mini { padding: 12px; font-size: .9rem; width: auto; display: inline-block; margin: 0; }
+
+.row { display: -webkit-flex; display: flex; }
+.row > .btn { margin-top: 10px; }
+.row > .btn + .btn { margin-left: 8px; }
+
+.emoji-row {
+  display: -webkit-flex; display: flex;
+  -webkit-align-items: center; align-items: center;
+  -webkit-justify-content: center; justify-content: center;
+}
+.emoji-row .btn.mini { width: 56px; text-align: center; font-size: 1.1rem; }
+.emoji-box { font-size: 2.5rem; line-height: 1; width: 90px; text-align: center; }
+
+.me-line {
+  display: -webkit-flex; display: flex;
+  -webkit-align-items: center; align-items: center;
+  -webkit-justify-content: center; justify-content: center;
+  font-size: 1.35rem; font-weight: 800; text-align: center;
+}
+.me-line .emoji-box { font-size: 2rem; width: auto; margin-right: 10px; }
+
+.list { list-style: none; margin: 0; padding: 0; }
+.list li {
+  display: -webkit-flex; display: flex;
+  -webkit-align-items: center; align-items: center;
+  border-bottom: 1px solid #1f1f1f; padding: 10px 2px; font-size: .95rem;
+}
+.list li:last-child { border-bottom: 0; }
+.list .who { -webkit-flex: 1; flex: 1; margin-left: 10px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list .mark { font-size: .68rem; letter-spacing: .08em; color: #8a8a8a; text-transform: uppercase; white-space: nowrap; }
+.list .emoji { font-size: 1.4rem; line-height: 1; }
+
+.dot { width: 9px; height: 9px; border-radius: 50%; border: 2px solid #fff; display: inline-block; -webkit-flex: none; flex: none; }
+.dot.online { background: #fff; }
+.dot.idle { background: transparent; }
+.dot.offline { background: transparent; border-color: #555; }
+
+.pulse {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #fff;
+  margin-right: 8px; -webkit-animation: pulse 1.4s infinite ease-in-out; animation: pulse 1.4s infinite ease-in-out;
+}
+@-webkit-keyframes pulse { 0%,100% { opacity: .25 } 50% { opacity: 1 } }
+@keyframes pulse { 0%,100% { opacity: .25 } 50% { opacity: 1 } }
+
+.alert { border: 1px solid #6b6b6b; border-radius: 10px; padding: 12px; font-size: .85rem; color: #e5e5e5; text-align: center; margin-top: 12px; }
+.alert.ok { border-color: #fff; }
+
+/* ---------- Tarjeta de revelación (anti shoulder-surfing) ---------- */
+.pad {
+  position: relative; width: 208px; height: 208px; margin: 20px auto 8px;
+  display: -webkit-box; display: -webkit-flex; display: flex;
+  -webkit-box-align: center; -webkit-align-items: center; align-items: center;
+  -webkit-box-pack: center; -webkit-justify-content: center; justify-content: center;
+  -webkit-user-select: none; user-select: none; touch-action: none; cursor: pointer;
+}
+.pad .ring { position: absolute; top: 0; left: 0; width: 100%; height: 100%; -webkit-transform: rotate(-90deg); transform: rotate(-90deg); }
+.pad .knob {
+  width: 118px; height: 118px; border-radius: 50%; border: 2px solid #fff; background: #111;
+  display: -webkit-box; display: -webkit-flex; display: flex;
+  -webkit-box-align: center; -webkit-align-items: center; align-items: center;
+  -webkit-box-pack: center; -webkit-justify-content: center; justify-content: center;
+  font-size: 2.6rem;
+}
+
+.target {
+  font-size: 2rem; font-weight: 900; text-align: center; margin: 6px 0 0; min-height: 50px;
+  letter-spacing: .02em;
+  -webkit-transition: opacity .1s linear, -webkit-filter .1s linear;
+  transition: opacity .1s linear, filter .1s linear;
+}
+.hint { text-align: center; font-size: .85rem; color: #a3a3a3; min-height: 40px; }
+
+.footer { margin-top: 24px; text-align: center; font-size: .72rem; color: #666; }
+a { color: #fff; }
+
+/* ---------- Panel de administración ---------- */
+.badge {
+  display: inline-block; border: 1px solid #555; border-radius: 999px;
+  padding: 3px 10px; font-size: .68rem; letter-spacing: .1em; text-transform: uppercase; color: #ddd;
+}
+.badge.on { border-color: #fff; color: #fff; }
+.stat { font-size: .78rem; color: #9a9a9a; }
+.stat b { color: #fff; font-weight: 700; }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .8rem; }
+.pre { white-space: pre-wrap; word-break: break-word; font-size: .82rem; }
+.head { display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center; -webkit-justify-content: space-between; justify-content: space-between; margin-bottom: 10px; }
+.who-grid { display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center; }
+.who-grid .emoji-btn { background: transparent; border: 1px solid #444; color: #fff; border-radius: 8px; padding: 4px 8px; font-size: .8rem; font-family: inherit; }
+.who-grid .emoji-now { font-size: 1.6rem; width: 44px; text-align: center; }

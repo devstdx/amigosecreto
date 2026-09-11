@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Amigo Secreto</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <!-- ============================ VISTA 1: NOMBRE ============================ -->
+      <section id="view-name" class="hidden">
+        <h1>Amigo Secreto</h1>
+        <p class="muted">Escribe tu nombre y elige tu emoji. Solo hace falta una vez.</p>
+        <div class="card">
+          <label for="name-input">Tu nombre</label>
+          <input id="name-input" type="text" maxlength="20" autocomplete="nickname" autocapitalize="words" placeholder="Lucía" />
+          <label class="mt">Tu emoji</label>
+          <div class="emoji-row">
+            <button type="button" id="emoji-prev" class="btn mini ghost">&#9664;</button>
+            <span id="emoji-show" class="emoji-box">🙂</span>
+            <button type="button" id="emoji-next" class="btn mini ghost">&#9654;</button>
+          </div>
+          <button type="button" id="join-btn" class="btn">Entrar</button>
+        </div>
+        <p id="name-error" class="alert hidden"></p>
+      </section>
+
+      <!-- ============================ VISTA 2: ESPERA ============================ -->
+      <section id="view-wait" class="hidden">
+        <h1>Estás dentro</h1>
+        <div class="card">
+          <div class="me-line"><span id="wait-emoji" class="emoji-box">🙂</span><span id="wait-name">…</span></div>
+          <p class="muted" id="wait-count">Conectando…</p>
+        </div>
+        <div class="card">
+          <ul class="list" id="wait-list"></ul>
+        </div>
+        <p class="muted"><span class="pulse"></span>Esperando a que el anfitrión haga el sorteo…</p>
+        <button type="button" id="edit-btn" class="btn ghost">Editar mi nombre o emoji</button>
+        <p id="wait-error" class="alert hidden"></p>
+      </section>
+
+      <!-- ========================= VISTA 3: REVELACIÓN ========================= -->
+      <section id="view-reveal" class="hidden">
+        <h1 id="reveal-title">¡Sorteo hecho! 🎉</h1>
+        <p class="muted">Tu amigo secreto es…</p>
+        <p id="target-name" class="target"></p>
+        <div id="pad" class="pad">
+          <svg class="ring" viewBox="0 0 208 208" aria-hidden="true">
+            <circle cx="104" cy="104" r="94" fill="none" stroke="#333" stroke-width="8"></circle>
+            <circle id="ring-progress" cx="104" cy="104" r="94" fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-dasharray="590.6" stroke-dashoffset="590.6"></circle>
+          </svg>
+          <div class="knob" id="pad-knob">🎁</div>
+        </div>
+        <p class="hint" id="reveal-hint">Mantén pulsado 1,2 s para verlo. Se oculta al soltar.</p>
+      </section>
+
+      <p class="footer">
+        Sala única · para nuestro grupo<br />
+        <a href="/admin">Panel del anfitrión</a>
+      </p>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

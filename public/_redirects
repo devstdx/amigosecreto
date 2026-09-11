@@ -1,0 +1,5 @@
+# Aliases bonitos (200 = rewrite interno, sin cambiar la URL).
+# Nota: Cloudflare Pages YA resuelve `/admin` -> `admin.html` automáticamente
+# (html_handling), así que NO se pone esa regla: crearía un bucle de 308.
+/anfitrion  /admin   200
+/entrar     /        200
