@@ -78,13 +78,12 @@ const MAX_PLAYERS = 60;
 const SESSION_MAX_AGE = 60 * 60 * 24 * 365; // sesión de jugador: 1 año
 const ADMIN_MAX_AGE = 60 * 60 * 24 * 30; // sesión de admin: 30 días
 
-/** Latidos: el estado se recalcula en cada lectura, sin cron. */
-const ONLINE_MS = 15_000; // visto hace < 15 s y visible  ⇒ EN PANTALLA
-const STALE_MS = 60_000; // visto hace >= 60 s           ⇒ DESCONECTADO
+/** Presencia: se calcula al leer, sin cron (el latido se escribe cada 10 s). */
+const STALE_MS = 60_000; // visto hace >= 60 s ⇒ DESCONECTADO (inactivo = sin foco)
 /** El servidor solo escribe el latido cada 10 s aunque el cliente pulse cada 2 s.
  *  D1 factura por fila escrita: el doble de intervalo ⇒ la mitad de escrituras.
- *  Sigue por debajo de la ventana de presencia (ONLINE_MS = 15 s), así que el
- *  panel no muestra a nadie como "inactivo" mientras está en pantalla. */
+ *  Como la ventana de presencia es de 60 s (STALE_MS), nadie pasa a "inactivo"
+ *  mientras esté en pantalla. */
 const WRITE_EVERY_MS = 10_000;
 
 const PUBLIC_TICK_MS = 2000;
@@ -705,7 +704,6 @@ function handleConfig(env: Env): Response {
     maxPlayers: MAX_PLAYERS,
     tickMs: tickIntervalMs(env),
     adminTickMs: adminTickIntervalMs(env),
-    onlineMs: ONLINE_MS,
     staleMs: STALE_MS,
   });
 }

@@ -11,7 +11,7 @@
 # ============================================================================
 set -u
 
-BASE="${1:-http://localhost:8788}"
+BASE="${1:-${BASE:-http://localhost:8788}}"
 # Solo valor por defecto para pruebas locales (debe coincidir con .dev.vars);
 # NO es un secreto real: en producción la contraseña es el secreto ADMIN_PASSWORD.
 PASSWORD="${ADMIN_PASSWORD:-prueba123}"

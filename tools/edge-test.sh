@@ -15,7 +15,7 @@
 # ============================================================================
 set -u
 
-BASE="${1:-http://localhost:8788}"
+BASE="${1:-${BASE:-http://localhost:8788}}"
 PASSWORD="${ADMIN_PASSWORD:-prueba123}"
 
 # En local simulamos IPs distintas con CF-Connecting-IP; en producción Cloudflare
@@ -296,8 +296,10 @@ check "el esquema SQL está versionado" \
   "$(test -f "$(dirname "$0")/../schema.sql" && echo 1 || echo 0)" "1"
 check "wrangler.jsonc enruta /api/* al Worker (run_worker_first)" \
   "$(grep -c '"run_worker_first": \["/api/\*"\]' "$(dirname "$0")/../wrangler.jsonc" 2>/dev/null || echo 0)" "1"
-check "los estáticos NO se sirven desde la Function (sin cabecera de API)" \
-  "$(curl -s -D - -o /dev/null "$BASE/style.css" | tr -d '\r' | grep -ci 'x-robots-tag: noindex, nofollow')" "0"
+check "los estáticos los sirve el CDN, no la API (sin Cache-Control: no-store)" \
+  "$(curl -s -D - "$BASE/style.css" | tr -d '\r' | grep -ci 'cache-control: no-store')" "0"
+check "el estático conserva su tipo real (text/css)" \
+  "$(curl -s -D - "$BASE/style.css" | tr -d '\r' | grep -ci 'content-type: text/css')" "1"
 
 echo
 printf '\033[1mResultado adversarial: \033[32m%d correctas\033[0m · \033[31m%d fallidas\033[0m\n' "$PASS" "$FAIL"

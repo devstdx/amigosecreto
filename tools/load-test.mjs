@@ -233,6 +233,10 @@ async function main() {
   console.log("\n  ── consumo de D1 (factura por fila leída/escrita) ──");
   if (!usageBefore || !usageAfter) {
     console.log("  (sin métricas: define DEBUG_USAGE=1 en .dev.vars y reinicia el Worker)");
+  } else if (usageBefore.enabled === false || usageAfter.enabled === false) {
+    console.log(
+      "  (métricas de filas desactivadas en este destino: DEBUG_USAGE ≠ 1 ⇒ no se inventan cifras)"
+    );
   } else {
     const rowsRead = usageAfter.rowsRead - usageBefore.rowsRead;
     const rowsWritten = usageAfter.rowsWritten - usageBefore.rowsWritten;
