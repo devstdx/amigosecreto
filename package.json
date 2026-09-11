@@ -10,6 +10,7 @@
     "deploy:workers": "wrangler deploy",
     "db:create": "wrangler d1 create amigosecreto --location weur",
     "db:configure": "node tools/d1-configure.mjs",
+    "db:ensure": "node tools/d1-ensure.mjs",
     "db:local": "wrangler d1 execute amigosecreto --local --file=schema.sql",
     "db:remote": "wrangler d1 execute amigosecreto --remote --file=schema.sql",
     "secrets": "wrangler pages secret bulk",

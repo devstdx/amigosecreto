@@ -117,11 +117,15 @@ comandos. Se configuran en *tu Worker → Settings → Build*:
 
 | Ajuste | Valor | Por qué |
 | --- | --- | --- |
-| **Build command** | `npm run db:remote` | Aplica `schema.sql` en la D1 de producción en cada push. Es **idempotente** (`IF NOT EXISTS`), así que repetirlo no rompe nada y la base siempre tiene las tablas. |
+| **Build command** | `npm run db:ensure` | Deja D1 lista **sola**: si el config aún trae el UUID de relleno, busca la base `amigosecreto` en tu cuenta, **la crea si no existe**, fija el `database_id` en las dos configs y aplica `schema.sql` (idempotente). Si ya está todo configurado, solo reaplica el esquema. |
 | **Deploy command** | `npx wrangler deploy` | Despliega el Worker con `wrangler.jsonc` (ya incluye el binding `DB`). |
 
-Con eso cada `git push` deja esquema + Worker actualizados, y los logs del build
-muestran `env.DB (amigosecreto) D1 Database` cuando todo está en su sitio.
+Con eso cada `git push` deja base de datos + esquema + Worker en su sitio sin tocar
+nada a mano, y los logs del build muestran `env.DB (amigosecreto) D1 Database`.
+
+> ¿Prefieres controlarlo tú? `npm run db:create` (crea la base en WEUR) y
+> `npm run db:configure -- <database_id>` (fija el ID en las dos configs), y deja
+> el build command en `npm run db:remote` (solo aplica el esquema).
 
 **Rollback**: dashboard → *Deployments → Rollback*.
 
@@ -267,7 +271,7 @@ Los intervalos se ajustan **sin tocar código**: `TICK_MS`, `ADMIN_TICK_MS` y
 | Síntoma | Causa probable | Solución |
 | --- | --- | --- |
 | `Falta el binding de D1…` (**500**) | El `wrangler.jsonc` no tiene `d1_databases` o el binding no se llama `DB` | Añade el bloque `d1_databases` (te lo imprime `npm run db:create`) |
-| El build falla: `D1 binding 'DB' references database '000…0' which was not found [code: 10181]` | El `database_id` es el de relleno (la base aún no existe en tu cuenta) | Crea la base (`npx wrangler d1 create amigosecreto --location weur` o el dashboard → D1 → Create) y fija el ID con `npm run db:configure -- <database_id>`; vuelve a lanzar el build |
+| El build falla: `D1 binding 'DB' references database '000…0' which was not found [code: 10181]` | El `database_id` es el de relleno (la base aún no existe en tu cuenta) | Lo más rápido: pon el **Build command** del dashboard en `npm run db:ensure` y relanza el build (crea la base, fija el ID y aplica el esquema). A mano: `npm run db:create` + `npm run db:configure -- <database_id>` |
 | `No se pudo conectar con el almacén de datos` (**503**) | Tablas ausentes o error persistente de D1 (tras 1 reintento automático) | `npm run db:remote` para (re)aplicar `schema.sql`; revisa los logs con `npx wrangler tail` |
 | `El servidor no tiene configurados ADMIN_PASSWORD y ADMIN_SECRET` (**500**) | Faltan los secretos del panel | `npx wrangler secret put ADMIN_PASSWORD` y `ADMIN_SECRET` (las páginas siguen sirviéndose) |
 | Todo funciona pero el sorteo dice *faltan personas* | Nadie dentro o solo 1 | Hacen falta **2 o más** personas (nadie puede asignarse a sí mismo con 1) |
@@ -280,6 +284,14 @@ Los intervalos se ajustan **sin tocar código**: `TICK_MS`, `ADMIN_TICK_MS` y
 
 ## 📌 Historial
 
+- **v1.4.2 — D1 autoconfigurable desde el build**:
+  - `npm run db:ensure` (`tools/d1-ensure.mjs`): si el config trae el UUID de
+    relleno, busca la base en la cuenta, **la crea si no existe** (WEUR por
+    defecto, `D1_LOCATION` configurable), fija el `database_id` en las dos configs
+    y aplica `schema.sql`. Idempotente: repetirlo no rompe nada.
+  - Modo `--check` (sin autenticación) para diagnosticar en un segundo.
+  - Pensado para el *Build command* del dashboard ⇒ un push deja base + esquema +
+    Worker en su sitio sin pasos manuales.
 - **v1.4.1 — puesta en marcha de D1 en producción**:
   - `npm run db:configure -- <database_id>` (`tools/d1-configure.mjs`): fija el ID
     en **las dos** configs (JSONC y TOML) validando el UUID y rechazando el de
