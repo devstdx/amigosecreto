@@ -174,7 +174,18 @@ function run(command) {
   }
 }
 
+/** Contadores para medir el coste real (comandos facturables por Upstash). */
+const stats = { requests: 0, commands: 0, pipelines: 0, errors: 0 };
+
 const server = createServer((request, response) => {
+  /* Endpoint de métricas, ajeno al protocolo Upstash. */
+  if (request.method === "GET" && request.url.indexOf("/__stats") === 0) {
+    const text = JSON.stringify(stats);
+    response.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(text) });
+    response.end(text);
+    return;
+  }
+
   let body = "";
   request.on("data", (chunk) => {
     body += chunk;
@@ -201,15 +212,25 @@ const server = createServer((request, response) => {
       const isPipeline = Array.isArray(parsed) && Array.isArray(parsed[0]);
       if (isPipeline) {
         const results = parsed.map((command) => ({ result: run(command) }));
-        console.log(
-          `[mock] pipeline(${parsed.length}): ${parsed.map((command) => command[0]).join(", ")}`
-        );
+        stats.requests += 1;
+        stats.pipelines += 1;
+        stats.commands += parsed.length;
+        if (process.env.MOCK_QUIET !== "1") {
+          console.log(
+            `[mock] pipeline(${parsed.length}): ${parsed.map((command) => command[0]).join(", ")}`
+          );
+        }
         send(200, results);
         return;
       }
-      console.log(`[mock] ${Array.isArray(parsed) ? String(parsed[0]) : "?"}`);
+      if (process.env.MOCK_QUIET !== "1") {
+        console.log(`[mock] ${Array.isArray(parsed) ? String(parsed[0]) : "?"}`);
+      }
+      stats.requests += 1;
+      stats.commands += 1;
       send(200, { result: run(parsed) });
     } catch (error) {
+      stats.errors += 1;
       console.error("[mock] error:", error.message);
       send(400, { error: error.message });
     }

@@ -138,20 +138,56 @@ npm run deploy             # → https://amigo-secreto.pages.dev  y  /admin
 
 ---
 
-## 🧪 Pruebas
+## 🧪 Verificación y pruebas
+
+> ⚠️ Las suites comparten la **sala única**, así que deben ejecutarse **en serie**
+> (nunca dos a la vez): los scripts `npm` ya lo hacen con `&&`.
 
 ```bash
-npm run mock &                                  # terminal 1: mock de Upstash
-npm run dev &                                   # terminal 2: runtime de Cloudflare
-npm test                                        # 29 comprobaciones end-to-end
+npm run mock &          # terminal 1: mock de Upstash con contador de comandos
+npm run dev &           # terminal 2: runtime real de Cloudflare (workerd)
+
+npm run verify          # typecheck + ids HTML/JS + 29 pruebas funcionales + 62 adversariales
+npm run test:load       # carga: 12 personas, latencias y coste real de Upstash
+npm run test:failures   # fallos: upstream colgado/caído, falta de configuración
+npm run test            # solo las dos baterías de API (29 + 62)
 ```
 
-`tools/smoke-test.sh` verifica: configuración, altas, IP y dispositivo reales,
-presencia (en pantalla / inactivo / desconectado), login del panel, sorteo,
-**0 auto-asignaciones**, reparto por persona, persistencia de sesión,
-emojis (panel y jugador), reinicio de ronda y el derangement a escala.
+| Suite | Qué cubre |
+| --- | --- |
+| `tools/smoke-test.sh` (29) | Camino feliz de punta a punta: altas, IP, dispositivo, presencia, sorteo, reparto, sesión persistente, emojis, reinicio, matriz válida y derangement a escala |
+| `tools/edge-test.sh` (62) | Semántica HTTP (HEAD/OPTIONS/405/404), cuerpos inválidos y de 1 MB, saneado de nombres y XSS, emojis no permitidos, prioridad de `CF-Connecting-IP`, sorteo con 0/1/2 personas, altas posteriores al sorteo, sesiones invalidadas, expulsión, cookies manipuladas/caducadas, límite de intentos, aforo de 60, cabeceras de seguridad y CSP |
+| `tools/load-test.mjs` | 12 personas en paralelo durante N segundos: peticiones, errores, p50/p95/p99, auditoría del reparto y **comandos facturables** de Upstash (midiendo el delta) |
+| `tools/failure-test.sh` | Upstash que acepta y **nunca responde** (⇒ 503 en ~5 s por timeout), puerto cerrado (⇒ 503 inmediato), **sin variables de entorno** (⇒ 500 con mensaje claro) y el ajuste `TICK_MS` por entorno |
+| `tools/check-ids.mjs` | Cada `el("id")` del JS existe en su HTML (detecta erratas sin navegador) |
 
-**Checklist manual en el móvil** (tras desplegar):
+**Resultado de la última verificación (runtime real de Cloudflare):**
+
+```
+typecheck (tsc --noEmit)            ✓ sin errores
+check:ids                           ✓ 15 + 23 ids presentes
+smoke-test                          ✓ 29 correctas · 0 fallidas
+edge-test                           ✓ 62 correctas · 0 fallidas
+load-test (12 personas)             ✓ 141 peticiones · 0 errores · p50 19 ms · p95 31 ms
+                                    ✓ 12/12 objetivos · 0 auto-asignaciones · matriz válida
+failure-test                        ✓ 9 correctas · 0 fallidas (503 en 5 s, 500 claro sin config)
+```
+
+### Coste real de Upstash (medido, no estimado)
+
+Upstash factura **por comando**. Medido con 12 personas latiendo cada 2 s:
+
+| Ajuste | Sensación | ~Comandos / persona·hora | Sesiones de 3 h al mes (plan gratis de 500.000) |
+| --- | --- | --- | --- |
+| `TICK_MS=2000` (por defecto) | instantáneo | ~5.800 | ~3 |
+| `TICK_MS=4000` | rápido | ~4.100 | ~4,5 |
+| `TICK_MS=6000` + `HEARTBEAT_MS=15000` | aceptable | ~2.400 | ~7 |
+
+Los intervalos se cambian **sin tocar código** (variables de entorno del proyecto,
+o `--binding TICK_MS=4000` en local). Para nuestro grupo (una sesión de vez en
+cuando) el plan gratuito sobra; si empezáis a usarlo cada semana, sube `TICK_MS`.
+
+### Checklist manual en el móvil (tras desplegar)
 
 1. Abrir la URL, poner nombre y emoji → apareces en `/admin` con tu IP real.
 2. Bloquear la pantalla → a los ~20 s el panel muestra *inactivo*.
@@ -160,16 +196,20 @@ emojis (panel y jugador), reinicio de ronda y el derangement a escala.
 5. **Ver matriz** → 0 auto-asignaciones y reparto completo.
 6. Añadir a alguien después del sorteo → el panel avisa y ofrece volver a sortear.
 
+
 ---
 
 ## 🧯 Solución de problemas
 
 | Síntoma | Causa probable | Solución |
 | --- | --- | --- |
-| `Falta la configuración de Upstash…` (500) | Variables no definidas en el proyecto | `npx wrangler pages secret put …` o Settings → Environment variables (Production **y** Preview) |
-| `No se pudo conectar con el almacén de datos` (503) | URL/token de Upstash incorrectos o base borrada | Revisa las credenciales REST en la consola de Upstash |
-| `El servidor no tiene configurados ADMIN_PASSWORD y ADMIN_SECRET` | Faltan secretos del panel | Defínelos y vuelve a desplegar |
+| `No se pudo conectar con el almacén de datos` (**503**) | Upstash caído, URL/token erróneos, o **sin saldo** en el plan | Revisa las credenciales REST y el consumo del mes; la app se recupera sola al volver la conexión |
+| La respuesta tarda ~5 s y luego 503 | Upstash acepta pero no responde | Es el **timeout de seguridad**: el invitado nunca se queda colgado; revisa el estado del proveedor |
+| `Falta la configuración de Upstash…` (**500**) | Variables no definidas en el proyecto | `npx wrangler pages secret put …` o Settings → Environment variables (Production **y** Preview) |
+| `El servidor no tiene configurados ADMIN_PASSWORD y ADMIN_SECRET` (**500**) | Faltan secretos del panel | Defínelos y vuelve a desplegar (las páginas siguen sirviéndose) |
+| Todo funciona pero el sorteo dice *faltan personas* | Nadie dentro o solo 1 | Hacen falta **2 o más** personas (nadie puede asignarse a sí mismo con 1) |
 | El panel no entra y no da error | Cookie bloqueada (modo privado / WebView) | Abre en el navegador normal; la sesión del jugador ya tiene triple respaldo |
+| Empiezan a aparecer 503 al final del mes | Se agotaron los 500.000 comandos gratis | Sube `TICK_MS`/`HEARTBEAT_MS` (ver tabla de coste) o pasa a pago por uso (0,20 $/100K) |
 | La sala aparece vacía tras días | TTL de inactividad (30 días) | `ROOM_TTL_DAYS` o simplemente vuelve a entrar |
 | Nombre de proyecto ocupado al desplegar | `amigo-secreto` ya existe | `--project-name otro-nombre` y actualiza `name` en `wrangler.toml` |
 
@@ -177,10 +217,27 @@ emojis (panel y jugador), reinicio de ronda y el derangement a escala.
 
 ## 📌 Historial
 
+- **v1.1.0 — auditoría de producción** (esta pasada):
+  - **Corregido un fallo grave**: los handlers async se devolvían **sin `await`**
+    dentro del `try` del router, así que sus excepciones *no* llegaban al
+    `catch` y Cloudflare respondía **500** en vez de `503`/`409`. Se arregló con
+    `errorResponse()` + doble red de seguridad (try/catch en `onRequest`).
+  - **Timeout de 5 s al upstream**: si Upstash se cuelga, la petición del
+    invitado ya no espera indefinidamente (503 en 5 s) y el front reintenta.
+  - **`HEAD` tratado como `GET`** (sin cuerpo): los monitores de disponibilidad
+    ya no marcan el sitio como caído con un 405.
+  - **Coste de Upstash reducido a la mitad** (−44 % medido): lectura pública de
+    2 comandos en lugar de 4, un solo comando por latido (sin refrescar el TTL)
+    e intervalos ajustables por entorno (`TICK_MS`, `ADMIN_TICK_MS`,
+    `HEARTBEAT_MS`).
+  - **Validación de entrada antes de tocar la base** en el panel (un `action`
+    inválido devuelve 400 inmediato, sin gastar comandos ni devolver 404).
+  - **Baterías nuevas**: 62 casos adversariales, carga con medición de coste,
+    9 casos de fallo controlado y comprobación estática de ids HTML/JS.
 - **v1.0.0** — Reescritura monolítica para Cloudflare Pages: sala única, sesión
   persistente (cookie + localStorage), panel de administración (IP, dispositivo,
   presencia, emojis, sorteo y auditoría), salida de Next.js/Tailwind/React
   (cero build, cero dependencias en runtime) y backend en una sola Pages
-  Function con Upstash REST. La versión mult-isala anterior queda en el
+  Function con Upstash REST. La versión multi-sala anterior queda en el
   historial de git.
 

@@ -39,6 +39,10 @@ interface Env {
   ADMIN_SECRET?: string;
   ROOM_ID?: string;
   ROOM_TTL_DAYS?: string;
+  /** Ajustes finos de coste (ms). Opcionales: tienen valores por defecto. */
+  TICK_MS?: string;
+  ADMIN_TICK_MS?: string;
+  HEARTBEAT_MS?: string;
 }
 
 interface PagesContext {
@@ -51,6 +55,9 @@ interface PagesContext {
 
 /** Una orden del protocolo Redis en formato REST: ["HSET", clave, campo, valor] */
 type Cmd = (string | number)[];
+
+/** Corte de seguridad: si el upstream no responde en 5 s se degrada a 503. */
+const UPSTREAM_TIMEOUT_MS = 5000;
 
 /* ============================== CONSTANTES ============================== */
 
@@ -336,9 +343,12 @@ async function redis(env: Env, commands: Cmd[]): Promise<unknown[]> {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(commands),
+      /* Si Upstash se cuelga, abortamos: mejor un 503 en 5 s que una pantalla
+         de "cargando" infinita en el móvil del invitado. */
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
   } catch (cause) {
-    console.error("[upstash] fetch falló:", cause);
+    console.error("[upstash] fetch falló o expiró:", cause);
     throw new UpstreamError();
   }
 
@@ -427,6 +437,23 @@ function ttlSeconds(env: Env): number {
   return Math.round(safeDays * 24 * 60 * 60);
 }
 
+/**
+ * Intervalos ajustables por entorno para controlar el coste de Upstash sin
+ * recompilar: TICK_MS, ADMIN_TICK_MS y HEARTBEAT_MS (con acotado defensivo).
+ */
+function intervalMs(env: Env, key: "TICK_MS" | "ADMIN_TICK_MS" | "HEARTBEAT_MS", fallback: number, min: number, max: number): number {
+  const raw = Number(env[key]);
+  if (!Number.isFinite(raw) || raw < min) return fallback;
+  return Math.min(max, Math.round(raw));
+}
+
+/** Frecuencia del latido del jugador (por defecto 2 s). */
+const tickIntervalMs = (env: Env) => intervalMs(env, "TICK_MS", PUBLIC_TICK_MS, 1000, 15000);
+/** Frecuencia de refresco del panel (por defecto 3 s). */
+const adminTickIntervalMs = (env: Env) => intervalMs(env, "ADMIN_TICK_MS", ADMIN_TICK_MS, 1000, 15000);
+/** Cada cuánto se escribe realmente el latido en Redis (por defecto 5 s). */
+const writeIntervalMs = (env: Env) => intervalMs(env, "HEARTBEAT_MS", WRITE_EVERY_MS, 2000, 60000);
+
 /* ============================== MODELO ============================== */
 
 /** Registro persistido: claves cortas para que el JSON sea diminuto. */
@@ -474,20 +501,38 @@ function statusOf(player: Player, now: number): Presence {
 /* ============================== LECTURA DE SALA ============================== */
 
 /**
- * Lee la sala completa en UNA sola petición HTTP (pipeline de 4 órdenes).
- * `extra` permite añadir órdenes adicionales al mismo pipeline (p. ej. HLEN
- * para el panel de admin) sin coste extra de latencia.
+ * Lee la sala completa en UNA sola petición HTTP.
+ *  · modo público (2 comandos): estado + jugadores. Es lo que necesitan el
+ *    latido, el alta y los ajustes del panel.
+ *  · modo completo (4 comandos): añade ronda y fecha del sorteo (sorteo/panel).
+ * Upstash factura POR COMANDO, así que el modo público recorta el coste del
+ * polling a la mitad sin perder ninguna funcionalidad del jugador.
+ * `extra` permite añadir órdenes al mismo pipeline (p. ej. HLEN en el panel).
  */
-async function readRoom(env: Env, extra: Cmd[] = []): Promise<{ room: Room; extra: unknown[] }> {
-  const results = await redis(env, [
-    ["GET", keyState(env)],
-    ["GET", keyRound(env)],
-    ["GET", keyDrawnAt(env)],
-    ["HGETALL", keyPlayers(env)],
-    ...extra,
-  ]);
+async function readRoom(
+  env: Env,
+  full = true,
+  extra: Cmd[] = []
+): Promise<{ room: Room; extra: unknown[] }> {
+  const base: Cmd[] = full
+    ? [
+        ["GET", keyState(env)],
+        ["GET", keyRound(env)],
+        ["GET", keyDrawnAt(env)],
+        ["HGETALL", keyPlayers(env)],
+      ]
+    : [
+        ["GET", keyState(env)],
+        ["HGETALL", keyPlayers(env)],
+      ];
 
-  const [rawState, rawRound, rawDrawnAt, rawPlayers] = results;
+  const results = await redis(env, [...base, ...extra]);
+
+  const rawState = results[0];
+  const rawRound = full ? results[1] : null;
+  const rawDrawnAt = full ? results[2] : null;
+  const rawPlayers = results[full ? 3 : 1];
+
   const players: Player[] = [];
 
   for (const [id, raw] of entriesOf(rawPlayers)) {
@@ -520,16 +565,16 @@ async function readRoom(env: Env, extra: Cmd[] = []): Promise<{ room: Room; extr
     players,
   };
 
-  return { room, extra: results.slice(4) };
+  return { room, extra: results.slice(base.length) };
 }
 
-/** Proyección pública: SIN ids reales (solo pseudónimos), sin IP ni UA. */
+/** Proyección pública: SIN ids reales (solo pseudónimos), sin IP ni UA.
+ *  No incluye la ronda (dato solo del panel) para no leer claves de más. */
 function publicSnapshot(room: Room, now: number, meId: string | null) {
   const me = meId ? room.players.find((player) => player.id === meId) ?? null : null;
   return {
     ok: true,
     state: room.state,
-    round: room.round,
     total: room.players.length,
     minPlayers: MIN_PLAYERS,
     maxPlayers: MAX_PLAYERS,
@@ -575,6 +620,8 @@ function adminSnapshot(room: Room, now: number, assignedCount: number | null) {
 const PLAYER_COOKIE = "as_player";
 const ADMIN_COOKIE = "as_admin";
 const PLAYER_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
+/** Pseudónimo público de un jugador (FNV-1a doble ⇒ 16 caracteres hex). */
+const PID_PATTERN = /^[0-9a-f]{8,32}$/;
 
 /**
  * Identifica al jugador por tres vías (en orden de preferencia):
@@ -673,14 +720,14 @@ function parseEmoji(raw: unknown): string | null {
 /* ============================== HANDLERS ============================== */
 
 /** GET /api/config — configuración pública (una sola fuente de verdad). */
-function handleConfig(): Response {
+function handleConfig(env: Env): Response {
   return json({
     ok: true,
     emojis: EMOJIS,
     minPlayers: MIN_PLAYERS,
     maxPlayers: MAX_PLAYERS,
-    tickMs: PUBLIC_TICK_MS,
-    adminTickMs: ADMIN_TICK_MS,
+    tickMs: tickIntervalMs(env),
+    adminTickMs: adminTickIntervalMs(env),
     onlineMs: ONLINE_MS,
     staleMs: STALE_MS,
   });
@@ -698,7 +745,7 @@ async function handleState(
 ): Promise<Response> {
   const meId = resolvePlayerId(request, body);
   const now = Date.now();
-  const { room } = await readRoom(env);
+  const { room } = await readRoom(env, false);
   const me = meId ? room.players.find((player) => player.id === meId) ?? null : null;
 
   if (heartbeat && me) {
@@ -708,7 +755,7 @@ async function handleState(
     const needsWrite =
       emojiChanged ||
       me.visible !== wantedVisible ||
-      now - me.lastSeen > WRITE_EVERY_MS;
+      now - me.lastSeen > writeIntervalMs(env);
 
     if (needsWrite) {
       const stored: StoredPlayer = {
@@ -720,12 +767,9 @@ async function handleState(
         ls: now,
         v: wantedVisible ? 1 : 0,
       };
-      const ttl = ttlSeconds(env);
-      await redis(env, [
-        ["HSET", keyPlayers(env), me.id, JSON.stringify(stored)],
-        ["EXPIRE", keyPlayers(env), ttl],
-        ["EXPIRE", keyState(env), ttl],
-      ]);
+      /* Un solo comando por latido: el TTL (30 días) se renueva en el alta y en
+         el sorteo, no hace falta gastar dos EXPIRE cada 5 segundos. */
+      await redis(env, [["HSET", keyPlayers(env), me.id, JSON.stringify(stored)]]);
       me.lastSeen = now;
       me.visible = wantedVisible;
       me.emoji = stored.e;
@@ -753,7 +797,7 @@ async function handleJoin(
 
   const ip = clientIp(request);
   const userAgent = request.headers.get("User-Agent") || "";
-  const { room } = await readRoom(env);
+  const { room } = await readRoom(env, false);
 
   const requestedId = resolvePlayerId(request, payload);
   const previous = requestedId
@@ -796,7 +840,7 @@ async function handleJoin(
       me: { id, n: name, e: emoji },
       state: room.state,
       total: previous ? room.players.length : room.players.length + 1,
-      config: { emojis: EMOJIS, minPlayers: MIN_PLAYERS, tickMs: PUBLIC_TICK_MS },
+      config: { emojis: EMOJIS, minPlayers: MIN_PLAYERS, tickMs: tickIntervalMs(env) },
     },
     200,
     { "Set-Cookie": playerCookieHeader(request, id) }
@@ -901,7 +945,7 @@ async function handleAdminState(request: Request, env: Env): Promise<Response> {
   if (request.headers.get("X-Admin-Probe") !== null) {
     return json({ ok: true, admin: await isAdmin(request, env) });
   }
-  const { room, extra } = await readRoom(env, [["HLEN", keyAssign(env)]]);
+  const { room, extra } = await readRoom(env, true, [["HLEN", keyAssign(env)]]);
   const assignedRaw = extra[0];
   const assigned = typeof assignedRaw === "number" ? assignedRaw : Number(assignedRaw) || 0;
   return json(adminSnapshot(room, Date.now(), assigned));
@@ -963,9 +1007,15 @@ async function handleAdminPlayer(env: Env, body: Record<string, unknown> | null)
   const payload = body ?? {};
   const pid = typeof payload.p === "string" ? payload.p : "";
   const action = typeof payload.action === "string" ? payload.action : "";
+  /* Validar la entrada ANTES de tocar el almacén: una acción inválida no debe
+     consumir comandos de Redis ni devolver un 404 confuso. */
   if (!pid) return fail(400, "Falta el identificador de la persona.");
+  if (action !== "kick" && action !== "emoji_next" && action !== "emoji_prev") {
+    return fail(400, "Acción no reconocida. Usa: kick, emoji_next o emoji_prev.");
+  }
+  if (!PID_PATTERN.test(pid)) return fail(400, "Identificador de persona no válido.");
 
-  const { room } = await readRoom(env);
+  const { room } = await readRoom(env, false);
   const player = room.players.find((candidate) => candidate.pid === pid);
   if (!player) return fail(404, "Esa persona ya no está en la sala.");
 
@@ -975,10 +1025,6 @@ async function handleAdminPlayer(env: Env, body: Record<string, unknown> | null)
       ["HDEL", keyAssign(env), player.id],
     ]);
     return json({ ok: true, kicked: pid });
-  }
-
-  if (action !== "emoji_next" && action !== "emoji_prev") {
-    return fail(400, "Acción no reconocida.");
   }
 
   const index = EMOJIS.indexOf(player.emoji);
@@ -1059,12 +1105,47 @@ function methodNotAllowed(allowed: string[]): Response {
   return fail(405, `Método no permitido. Usa: ${allowed.join(", ")}.`, { Allow: allowed.join(", ") });
 }
 
+/**
+ * Traduce cualquier excepción a una respuesta HTTP con mensaje en español.
+ * Se usa en DOS sitios a propósito (ver `onRequest`): es la red de seguridad
+ * contra el clásico error de `return promiseSinAwait` dentro de un try/catch.
+ */
+function errorResponse(error: unknown): Response {
+  if (error instanceof ConfigError) return fail(500, error.message);
+  if (error instanceof UpstreamError) {
+    return fail(503, "No se pudo conectar con el almacén de datos. Reintenta en unos segundos.");
+  }
+  if (error instanceof RangeError) return fail(409, error.message);
+  console.error("[api] error no controlado:", error);
+  return fail(500, "Error interno del servidor.");
+}
+
 export async function onRequest(context: PagesContext): Promise<Response> {
+  let response: Response;
+  try {
+    /* `await` deliberado: si algún handler async se devolviera sin esperar
+       desde el router, su rechazo se captura AQUÍ (no en el try interno). */
+    response = await routeRequest(context);
+  } catch (error) {
+    response = errorResponse(error);
+  }
+
+  /* HTTP/1.1 exige respuesta SIN cuerpo para HEAD (monitores de disponibilidad,
+     preflight de algunos WebViews). */
+  if (context.request.method.toUpperCase() === "HEAD") {
+    return new Response(null, { status: response.status, headers: response.headers });
+  }
+  return response;
+}
+
+async function routeRequest(context: PagesContext): Promise<Response> {
   const { request, env } = context;
   const method = request.method.toUpperCase();
+  /* HEAD se atiende como GET en todas las rutas de lectura. */
+  const isRead = method === "GET" || method === "HEAD";
 
   if (method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: { Allow: "GET, POST, OPTIONS" } });
+    return new Response(null, { status: 204, headers: { Allow: "GET, HEAD, POST, OPTIONS" } });
   }
 
   const path = routePath(context);
@@ -1073,7 +1154,7 @@ export async function onRequest(context: PagesContext): Promise<Response> {
     /* ------------------------------ públicas ------------------------------ */
 
     if (path === "" || path === "index") {
-      if (method !== "GET") return methodNotAllowed(["GET"]);
+      if (!isRead) return methodNotAllowed(["GET", "HEAD"]);
       return json({
         ok: true,
         app: "amigo-secreto",
@@ -1095,8 +1176,8 @@ export async function onRequest(context: PagesContext): Promise<Response> {
     }
 
     if (path === "config") {
-      if (method !== "GET") return methodNotAllowed(["GET"]);
-      return handleConfig();
+      if (!isRead) return methodNotAllowed(["GET", "HEAD"]);
+      return handleConfig(env);
     }
 
     if (path === "join") {
@@ -1110,13 +1191,13 @@ export async function onRequest(context: PagesContext): Promise<Response> {
     }
 
     if (path === "state") {
-      if (method === "GET") return handleState(request, env, null, false);
+      if (isRead) return handleState(request, env, null, false);
       if (method === "POST") return handleState(request, env, await readJsonBody(request), true);
-      return methodNotAllowed(["GET", "POST"]);
+      return methodNotAllowed(["GET", "HEAD", "POST"]);
     }
 
     if (path === "target") {
-      if (method !== "GET") return methodNotAllowed(["GET"]);
+      if (!isRead) return methodNotAllowed(["GET", "HEAD"]);
       return handleTarget(request, env);
     }
 
@@ -1135,7 +1216,7 @@ export async function onRequest(context: PagesContext): Promise<Response> {
       }
 
       if (path === "admin/state") {
-        if (method !== "GET") return methodNotAllowed(["GET"]);
+        if (!isRead) return methodNotAllowed(["GET", "HEAD"]);
         return handleAdminState(request, env);
       }
       if (path === "admin/draw") {
@@ -1151,20 +1232,14 @@ export async function onRequest(context: PagesContext): Promise<Response> {
         return handleAdminPlayer(env, await readJsonBody(request));
       }
       if (path === "admin/matrix") {
-        if (method !== "GET") return methodNotAllowed(["GET"]);
+        if (!isRead) return methodNotAllowed(["GET", "HEAD"]);
         return handleAdminMatrix(env);
       }
     }
 
     return fail(404, `Ruta no encontrada: /api/${path}`);
   } catch (error) {
-    if (error instanceof ConfigError) return fail(500, error.message);
-    if (error instanceof UpstreamError) {
-      return fail(503, "No se pudo conectar con el almacén de datos. Reintenta en unos segundos.");
-    }
-    if (error instanceof RangeError) return fail(409, error.message);
-    console.error("[api] error no controlado:", error);
-    return fail(500, "Error interno del servidor.");
+    return errorResponse(error);
   }
 }
 

@@ -18,6 +18,14 @@ ADMIN_SECRET="cadena-larga-y-aleatoria-de-al-menos-32-caracteres"
 # ROOM_ID="main"        # id de la sala única
 # ROOM_TTL_DAYS="30"    # días que sobrevive el estado sin actividad
 
+# --- Control de coste (Upstash factura por comando) ---
+# Sube estos valores si vas a hacer muchas sesiones al mes. Medido con 12
+# personas: TICK_MS=2000 ⇒ ~5.800 comandos/persona·hora (~3 sesiones de 3 h/mes
+# dentro del plan gratuito de 500.000). TICK_MS=6000 + HEARTBEAT_MS=15000 ⇒ ~2.400.
+# TICK_MS="2000"        # latido del jugador (1000–15000 ms)
+# ADMIN_TICK_MS="3000"  # refresco del panel (1000–15000 ms)
+# HEARTBEAT_MS="5000"   # cada cuánto se escribe el latido (2000–60000 ms)
+
 # --- Solo para pruebas locales sin Upstash (ver tools/mock-upstash.mjs) ---
 # UPSTASH_REDIS_REST_URL="http://127.0.0.1:9999"
 # UPSTASH_REDIS_REST_TOKEN="mock-token"

@@ -8,7 +8,11 @@
     "deploy": "wrangler pages deploy public",
     "pages:create": "wrangler pages project create",
     "mock": "node tools/mock-upstash.mjs",
-    "test": "bash tools/smoke-test.sh",
+    "test": "bash tools/smoke-test.sh && bash tools/edge-test.sh",
+    "test:load": "node tools/load-test.mjs",
+    "test:failures": "bash tools/failure-test.sh",
+    "check:ids": "node tools/check-ids.mjs",
+    "verify": "npm run typecheck && npm run check:ids && npm test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
