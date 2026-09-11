@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "wrangler dev --port 8788",
     "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create amigosecreto",
+    "db:local": "wrangler d1 execute amigosecreto --local --file=schema.sql",
+    "db:remote": "wrangler d1 execute amigosecreto --remote --file=schema.sql",
     "secrets": "wrangler secret bulk",
     "deploy:pages": "wrangler pages deploy public --config wrangler.pages.toml",
-    "mock": "node tools/mock-upstash.mjs",
     "test": "bash tools/smoke-test.sh && bash tools/edge-test.sh",
     "test:load": "node tools/load-test.mjs",
     "test:failures": "bash tools/failure-test.sh",

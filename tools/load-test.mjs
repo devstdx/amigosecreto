@@ -7,8 +7,10 @@
  *  Simula una quedada real contra el runtime local (o contra producción):
  *    · N personas entran a la vez, laten cada 2 s y el anfitrión refresca cada 3 s
  *    · Al final se sortea, cada persona pide su amigo secreto y se audita
- *    · Mide latencias (p50/p95/p99), errores y **comandos de Upstash**, y
- *      extrapola el coste frente al plan gratuito (500.000 comandos/mes)
+ *    · Mide latencias (p50/p95/p99), errores y **filas leídas/escritas de D1**,
+ *      y las compara con el cupo diario gratuito (5M lecturas / 100k escrituras)
+ *
+ *  Requiere DEBUG_USAGE=1 en .dev.vars (solo local) para leer /api/admin/usage.
  *
  *  Uso:
  *    node tools/load-test.mjs                                   (10 personas · 20 s)
@@ -19,7 +21,11 @@
 
 const BASE = process.env.BASE || "http://localhost:8788";
 const PASSWORD = process.env.ADMIN_PASSWORD || "prueba123";
-const MOCK_STATS_URL = process.env.MOCK_STATS_URL || "http://127.0.0.1:9999/__stats";
+/** Endpoint admin que informa del consumo de D1 (activo con DEBUG_USAGE=1). */
+const USAGE_PATH = "/api/admin/usage";
+/** Plan gratuito de D1 (por día): filas leídas y escritas. */
+const FREE_ROWS_READ = 5000000;
+const FREE_ROWS_WRITTEN = 100000;
 
 const args = process.argv.slice(2);
 const readArg = (name, fallback) => {
@@ -30,7 +36,6 @@ const PLAYERS = Number(readArg("players", "10"));
 const SECONDS = Number(readArg("seconds", "20"));
 const TICK_MS = Number(readArg("tick", "2000"));
 const ADMIN_TICK_MS = 3000;
-const FREE_TIER_COMMANDS = 500000;
 
 const latencies = [];
 const statuses = new Map();
@@ -77,12 +82,16 @@ async function call(path, options = {}) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Lee los contadores del mock (comandos facturables por Upstash). */
-async function readUsage() {
+/** Lee el consumo acumulado de D1 en este isolate (filas leídas/escritas). */
+async function readUsage(headers) {
   try {
-    const response = await fetch(MOCK_STATS_URL, { signal: AbortSignal.timeout(2000) });
+    const response = await fetch(`${BASE}${USAGE_PATH}`, {
+      headers,
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) return null;
     const data = await response.json();
-    return typeof data.commands === "number" ? data : null;
+    return typeof data.rowsRead === "number" ? data : null;
   } catch {
     return null;
   }
@@ -118,8 +127,8 @@ async function main() {
   });
   console.log(`  limpieza de sala: ${reset.status}`);
 
-  /* Medición por DELTA: el contador del mock puede traer ruido de otras pruebas. */
-  const usageBefore = await readUsage();
+  /* Medición por DELTA: los contadores son acumulados del isolate. */
+  const usageBefore = await readUsage(adminHeaders);
   const startedAt = Date.now();
 
   /* 2. altas simultáneas (prueba de carrera en el alta) */
@@ -214,26 +223,35 @@ async function main() {
   if (matrix.data.selfAssigned !== 0 || !matrix.data.valid) failures += 1;
   if (delivered !== PLAYERS) failures += 1;
 
-  /* 5. coste real por DELTA (Upstash factura por comando) */
-  const usageAfter = await readUsage();
+  /* 5. consumo real de D1 por DELTA (factura por fila leída/escrita) */
+  const usageAfter = await readUsage(adminHeaders);
   const elapsed = (Date.now() - startedAt) / 1000;
 
-  console.log("\n  ── coste (Upstash factura por comando) ──");
+  console.log("\n  ── consumo de D1 (factura por fila leída/escrita) ──");
   if (!usageBefore || !usageAfter) {
-    console.log(`  (sin métricas: ${MOCK_STATS_URL} no accesible o no es el mock)`);
+    console.log("  (sin métricas: define DEBUG_USAGE=1 en .dev.vars y reinicia el Worker)");
   } else {
-    const commands = usageAfter.commands - usageBefore.commands;
-    const perSecond = commands / elapsed;
-    const perPlayerHour = (perSecond / PLAYERS) * 3600;
-    const session3h = perSecond * 3600 * 3;
-    const sessionsPerMonth = Math.floor(FREE_TIER_COMMANDS / Math.max(1, session3h));
-    console.log(`  comandos en esta prueba: ${commands} en ${elapsed.toFixed(1)} s (${perSecond.toFixed(1)}/s)`);
-    console.log(`  coste por persona y hora: ~${Math.round(perPlayerHour)} comandos`);
-    console.log(`  sesión de 3 h con ${PLAYERS} personas: ~${Math.round(session3h)} comandos`);
+    const rowsRead = usageAfter.rowsRead - usageBefore.rowsRead;
+    const rowsWritten = usageAfter.rowsWritten - usageBefore.rowsWritten;
+    const queries = usageAfter.queries - usageBefore.queries;
+    const readPerPlayerHour = (rowsRead / elapsed / PLAYERS) * 3600;
+    const writePerPlayerHour = (rowsWritten / elapsed / PLAYERS) * 3600;
+    const session3hReads = (rowsRead / elapsed) * 3600 * 3;
+    const session3hWrites = (rowsWritten / elapsed) * 3600 * 3;
+    const readPct = (session3hReads / FREE_ROWS_READ) * 100;
+    const writePct = (session3hWrites / FREE_ROWS_WRITTEN) * 100;
     console.log(
-      `  plan gratuito (500.000/mes): ${session3h < FREE_TIER_COMMANDS ? "✅ entra de sobra" : "⚠️ ajusta intervalos"} · margen ~${sessionsPerMonth} sesiones al mes`
+      `  esta prueba: ${queries} consultas · ${rowsRead} filas leídas · ${rowsWritten} filas escritas en ${elapsed.toFixed(1)} s`
     );
-    console.log(`  (con TICK_MS=4000 el coste baja ~30 % y con TICK_MS=6000 ~55 %)`);
+    console.log(
+      `  por persona y hora: ~${Math.round(readPerPlayerHour)} lecturas · ~${Math.round(writePerPlayerHour)} escrituras`
+    );
+    console.log(
+      `  sesión de 3 h con ${PLAYERS} personas: ~${Math.round(session3hReads)} lecturas · ~${Math.round(session3hWrites)} escrituras`
+    );
+    console.log(
+      `  plan gratuito D1 por día: 5.000.000 lecturas y 100.000 escrituras ⇒ usa el ${readPct.toFixed(1)} % y el ${writePct.toFixed(1)} %`
+    );
   }
 
   console.log("");

@@ -259,6 +259,10 @@ for asset in style.css app.js admin.js; do
 done
 check "_routes.json ya NO se sirve (artefacto de Pages, sustituido por run_worker_first)" \
   "$(code "$BASE/_routes.json")" "404"
+check "el binding D1 está declarado en wrangler.jsonc" \
+  "$(grep -c '\"binding\": \"DB\"' "$(dirname "$0")/../wrangler.jsonc" 2>/dev/null || echo 0)" "1"
+check "el esquema SQL está versionado" \
+  "$(test -f "$(dirname "$0")/../schema.sql" && echo 1 || echo 0)" "1"
 check "wrangler.jsonc enruta /api/* al Worker (run_worker_first)" \
   "$(grep -c '"run_worker_first": \["/api/\*"\]' "$(dirname "$0")/../wrangler.jsonc" 2>/dev/null || echo 0)" "1"
 check "los estáticos NO se sirven desde la Function (sin cabecera de API)" \

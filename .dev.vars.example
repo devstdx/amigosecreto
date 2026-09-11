@@ -1,11 +1,6 @@
 # Amigo Secreto — variables de entorno (LOCAL)
-# Copia este archivo a .dev.vars para `wrangler dev` (Workers).
+# Copia este archivo a .dev.vars para `wrangler dev` (Workers + D1 local).
 # .dev.vars está en .gitignore: NUNCA se sube al repositorio.
-
-# --- Base de datos (Upstash Redis, plan gratuito: 500K comandos/mes) ---
-# Consola: https://console.upstash.com → tu base → "REST" → copia URL y token.
-UPSTASH_REDIS_REST_URL="https://tu-base.upstash.io"
-UPSTASH_REDIS_REST_TOKEN="tu-token-rest"
 
 # --- Panel de administración (/admin) ---
 # ADMIN_PASSWORD es la contraseña que escribirás en el panel.
@@ -16,16 +11,17 @@ ADMIN_SECRET="cadena-larga-y-aleatoria-de-al-menos-32-caracteres"
 
 # --- Opcionales ---
 # ROOM_ID="main"        # id de la sala única
-# ROOM_TTL_DAYS="30"    # días que sobrevive el estado sin actividad
+# ROOM_TTL_DAYS="30"    # días tras los que se purga a quien no vuelve
 
-# --- Control de coste (Upstash factura por comando) ---
-# Sube estos valores si vas a hacer muchas sesiones al mes. Medido con 12
-# personas: TICK_MS=2000 ⇒ ~5.800 comandos/persona·hora (~3 sesiones de 3 h/mes
-# dentro del plan gratuito de 500.000). TICK_MS=6000 + HEARTBEAT_MS=15000 ⇒ ~2.400.
+# --- Control de frecuencia (y por tanto de filas escritas en D1) ---
 # TICK_MS="2000"        # latido del jugador (1000–15000 ms)
 # ADMIN_TICK_MS="3000"  # refresco del panel (1000–15000 ms)
-# HEARTBEAT_MS="5000"   # cada cuánto se escribe el latido (2000–60000 ms)
+# HEARTBEAT_MS="10000"  # cada cuánto se escribe de verdad el latido (2000–60000 ms)
 
-# --- Solo para pruebas locales sin Upstash (ver tools/mock-upstash.mjs) ---
-# UPSTASH_REDIS_REST_URL="http://127.0.0.1:9999"
-# UPSTASH_REDIS_REST_TOKEN="mock-token"
+# --- Solo para PRUEBAS locales ---
+# DEBUG_USAGE="1"       # expone /api/admin/usage con filas leídas/escritas de D1
+#                       # (lo usa tools/load-test.mjs; no definir en producción)
+
+# NOTA: la base de datos ya no necesita credenciales: es el binding D1 "DB" de
+# wrangler.jsonc. En local se simula con SQLite (npx wrangler d1 execute … --local).
+

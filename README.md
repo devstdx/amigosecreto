@@ -16,10 +16,13 @@ en menos de un segundo, incluso en 3G.
 
 ```
 src/
-  worker.ts       BACKEND COMPLETO (1 archivo): router + dominio + Upstash REST
-                  + sesiones + panel admin + adaptador `export default { fetch }`
-                  de Workers. Sin dependencias npm (fetch + Web Crypto), sin
-                  nodejs_compat ⇒ 31,9 KiB de bundle (9,1 KiB gzip).
+  worker.ts       BACKEND COMPLETO (1 archivo): router + dominio + capa de datos
+                  D1 (SQL) + sesiones + panel admin + adaptador
+                  `export default { fetch }` de Workers. Sin dependencias npm
+                  (D1 + Web Crypto), sin nodejs_compat ⇒ 31,6 KiB (9,1 KiB gzip).
+
+schema.sql        Esquema de D1 (3 tablas). Idempotente: se puede reaplicar sin
+                  miedo en local y en remoto.
 
 public/           Assets servidos por el CDN (el Worker NO se invoca para ellos)
   index.html      Vista del jugador (nombre + emoji → espera → revelación)
@@ -34,51 +37,50 @@ functions/
   api/[[path]].ts Shim de 3 líneas para desplegar TAMBIÉN en Pages (respaldo).
                   Toda la lógica vive en src/worker.ts: cero duplicación.
 
-wrangler.jsonc    Config de PRODUCCIÓN (Workers): main + assets.directory +
-                  assets.run_worker_first = ["/api/*"]
+wrangler.jsonc    Config de PRODUCCIÓN: main + assets.run_worker_first
+                  + d1_databases (binding DB)
 wrangler.pages.toml  Config del respaldo Pages (se usa solo con --config)
 
-tools/            Mock de Upstash + 4 baterías de prueba automatizadas
+tools/            4 baterías de prueba automatizadas (ver más abajo)
 ```
 
-**Almacenamiento** (Upstash Redis, plan gratuito: 500K comandos/mes):
+**Almacenamiento: Cloudflare D1 (SQLite)** — sin cuentas ni credenciales extra:
 
-```
-room:<id>:state      string  LOBBY | DRAWN
-room:<id>:round      string  nº de ronda
-room:<id>:drawnAt    string  epoch ms del último sorteo
-room:<id>:players    hash    id_jugador -> {n,e,ip,ua,at,ls,v}   (JSON diminuto)
-room:<id>:assign     hash    id_jugador -> id_objetivo  ← SOLO servidor
-```
+| Tabla | Contenido |
+|---|---|
+| `room_state` | 1 fila (`id='main'`): `state` LOBBY/DRAWN, `round`, `drawn_at` |
+| `players` | 1 fila por persona: nombre, emoji, IP, UA, entrada, último latido, visibilidad |
+| `assignments` | 1 fila por persona: `giver_id → target_id` (**SOLO servidor**) |
+
+Reglas de diseño: todo se lee en **un solo `batch`** (1 ida y vuelta); el latido es
+un **UPDATE de una fila** (sin carreras al entrar varios a la vez); el sorteo es un
+**`batch` atómico** (borrar + insertar + cambiar estado: nunca queda a medias).
 
 ---
 
-## 🚀 Despliegue en producción (Cloudflare **Workers**)
+## 🚀 Despliegue en producción (Cloudflare **Workers** + **D1**)
 
 ```bash
-# 1) Base de datos gratis (2 min): https://console.upstash.com → Create Database
-#    Copia UPSTASH_REDIS_REST_URL y UPSTASH_REDIS_REST_TOKEN.
-
-# 2) Variables locales y dependencias
+# 1) Dependencias y variables locales (la base de datos no necesita credenciales)
 cp .dev.vars.example .dev.vars
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"   # → ADMIN_SECRET
 npm install
 
-# 3) Prueba local con el runtime real de Cloudflare (workerd)
-npm run mock  &            # (opcional) mock de Upstash si aún no tienes base
+# 2) Base de datos LOCAL (SQLite simulado) y prueba con el runtime real
+npm run db:local           # aplica schema.sql a la D1 local
 npm run dev                # http://localhost:8788  ·  /admin
 
-# 4) Autenticarse (este paso abre el navegador)
+# 3) Autenticarse (abre el navegador) y crear la base en tu cuenta
 npx wrangler login
+npm run db:create          # imprime el database_id → pégalo en wrangler.jsonc
+npm run db:remote          # aplica schema.sql en la D1 de producción
 
-# 5) Secretos de producción
-npx wrangler secret put UPSTASH_REDIS_REST_URL
-npx wrangler secret put UPSTASH_REDIS_REST_TOKEN
+# 4) Secretos de producción (solo dos)
 npx wrangler secret put ADMIN_PASSWORD
 npx wrangler secret put ADMIN_SECRET
 # (o de golpe:  npx wrangler secret bulk secrets.json)
 
-# 6) ¡A producción!
+# 5) ¡A producción!
 npm run deploy             # wrangler deploy  → https://amigosecreto.<sub>.workers.dev
 ```
 
@@ -87,7 +89,9 @@ Preflight sin desplegar (verificado en esta auditoría):
 ```bash
 npx wrangler deploy --dry-run --outdir=/tmp/build
 # ✨ Read 7 files from the assets directory ./public
-# Total Upload: 31.88 KiB / gzip: 9.14 KiB   ·   env.ASSETS (Assets)
+# Total Upload: 31.62 KiB / gzip: 9.08 KiB
+# env.DB (amigosecreto)   D1 Database
+# env.ASSETS              Assets
 ```
 
 **CI/CD opcional**: dashboard → tu Worker → *Settings → Builds* → conecta el repo
@@ -101,14 +105,16 @@ Rollback*, o `npx wrangler rollback`.
 npx wrangler pages deploy public --config wrangler.pages.toml
 ```
 
-| Variable | Obligatoria | Descripción |
+| Configuración | Obligatoria | Descripción |
 | --- | --- | --- |
-| `UPSTASH_REDIS_REST_URL` | sí | URL REST de Upstash |
-| `UPSTASH_REDIS_REST_TOKEN` | sí | Token REST de Upstash |
-| `ADMIN_PASSWORD` | sí | Contraseña del panel `/admin` |
-| `ADMIN_SECRET` | sí | Firma las cookies (HMAC-SHA256) y los pseudónimos |
+| `DB` (binding D1) | sí | Ya declarado en `wrangler.jsonc` → `d1_databases` |
+| `ADMIN_PASSWORD` | sí (secret) | Contraseña del panel `/admin` |
+| `ADMIN_SECRET` | sí (secret) | Firma las cookies (HMAC-SHA256) y los pseudónimos |
 | `ROOM_ID` | no | Id de la sala (por defecto `main`) |
-| `ROOM_TTL_DAYS` | no | Días de inactividad antes de expirar (por defecto 30) |
+| `ROOM_TTL_DAYS` | no | Días tras los que se purga a quien no vuelve (30) |
+| `TICK_MS` / `ADMIN_TICK_MS` / `HEARTBEAT_MS` | no | Frecuencias (afectan a las filas escritas) |
+| `DEBUG_USAGE` | no | Solo pruebas: expone `/api/admin/usage` |
+
 
 ---
 
@@ -156,10 +162,10 @@ npx wrangler pages deploy public --config wrangler.pages.toml
   máximo 20 caracteres contando emojis). CSP estricta en las páginas.
 - **Presencia sin cron**: el estado se calcula al leer (`online` < 15 s y
   visible, `idle` sin foco, `offline` ≥ 60 s).
-- **Coste controlado**: el latido escribe como máximo cada 5 s (aunque el
-  cliente pulse cada 2 s) y el estado se lee en **una sola petición HTTP** con
-  pipeline (4 órdenes). Con 10 personas unas 3 h se consumen ~60-180 mil
-  comandos de los 500 mil gratuitos al mes.
+- **Coste controlado**: el latido escribe como máximo cada 10 s (aunque el
+  cliente pulse cada 2 s) y toda lectura es **un solo `batch`**. Medido: ~48.700
+  lecturas y ~1.060 escrituras por persona·hora ⇒ una sesión de 3 h con 12
+  personas usa el **35 %** y el **38 %** del cupo diario gratuito de D1.
 - **`assets.run_worker_first: ["/api/*"]`** (antes `_routes.json`, que era de
   Pages): solo la API invoca al Worker; los estáticos los sirve el CDN sin coste
   de invocación.
@@ -172,50 +178,57 @@ npx wrangler pages deploy public --config wrangler.pages.toml
 > (nunca dos a la vez): los scripts `npm` ya lo hacen con `&&`.
 
 ```bash
-npm run mock &          # terminal 1: mock de Upstash con contador de comandos
-npm run dev &           # terminal 2: runtime real de Cloudflare (workerd)
+npm run db:local        # aplica schema.sql a la D1 local (SQLite simulado)
+npm run dev &           # runtime real de Cloudflare (workerd) en :8788
 
-npm run verify          # typecheck + ids HTML/JS + 29 pruebas funcionales + 63 adversariales
-npm run test:load       # carga: 12 personas, latencias y coste real de Upstash
-npm run test:failures   # fallos: upstream colgado/caído, falta de configuración
-npm run test            # solo las dos baterías de API (29 + 63)
+npm run verify          # typecheck + ids HTML/JS + 29 pruebas funcionales + 65 adversariales
+npm run test:load       # carga: 12 personas, latencias y consumo real de D1
+npm run test:failures   # fallos: sin binding D1, sin secretos, esquema ausente
+npm run test            # solo las dos baterías de API (29 + 65)
 ```
 
 | Suite | Qué cubre |
 | --- | --- |
 | `tools/smoke-test.sh` (29) | Camino feliz de punta a punta: altas, IP, dispositivo, presencia, sorteo, reparto, sesión persistente, emojis, reinicio, matriz válida y derangement a escala |
-| `tools/edge-test.sh` (63) | Semántica HTTP (HEAD/OPTIONS/405/404), cuerpos inválidos y de 1 MB, saneado de nombres y XSS, emojis no permitidos, prioridad de `CF-Connecting-IP`, sorteo con 0/1/2 personas, altas posteriores al sorteo, sesiones invalidadas, expulsión, cookies manipuladas/caducadas, límite de intentos, aforo de 60, `run_worker_first` en su sitio, cabeceras de seguridad y CSP |
-| `tools/load-test.mjs` | 12 personas en paralelo durante N segundos: peticiones, errores, p50/p95/p99, auditoría del reparto y **comandos facturables** de Upstash (midiendo el delta) |
-| `tools/failure-test.sh` | Upstash que acepta y **nunca responde** (⇒ 503 en ~5 s por timeout), puerto cerrado (⇒ 503 inmediato), **sin variables de entorno** (⇒ 500 con mensaje claro) y el ajuste `TICK_MS` por entorno |
+| `tools/edge-test.sh` (65) | Semántica HTTP (HEAD/OPTIONS/405/404), cuerpos inválidos y de 1 MB, saneado de nombres y XSS, emojis no permitidos, prioridad de `CF-Connecting-IP`, sorteo con 0/1/2 personas, altas posteriores al sorteo, sesiones invalidadas, expulsión, cookies manipuladas/caducadas, límite de intentos, aforo de 60, `run_worker_first` y el binding D1 declarados, cabeceras de seguridad y CSP |
+| `tools/load-test.mjs` | 12 personas en paralelo durante N segundos: peticiones, errores, p50/p95/p99, auditoría del reparto y **filas leídas/escritas reales de D1** (midiendo el delta con `/api/admin/usage`) |
+| `tools/failure-test.sh` (12) | Sin binding D1 (⇒ 500 con el mensaje exacto, sin trazas), sin `ADMIN_PASSWORD`/`ADMIN_SECRET` (⇒ 500 y las páginas siguen vivas), **esquema ausente** (⇒ 503 controlado sin filtrar errores de SQLite) y recuperación al restaurarlo |
 | `tools/check-ids.mjs` | Cada `el("id")` del JS existe en su HTML (detecta erratas sin navegador) |
 
-**Resultado de la última verificación (runtime real de Cloudflare, destino Workers):**
+**Resultado de la última verificación (runtime real de Cloudflare con D1):**
 
 ```
 typecheck (tsc --noEmit)            ✓ sin errores
 check:ids                           ✓ 15 + 23 ids presentes
 smoke-test                          ✓ 29 correctas · 0 fallidas
-edge-test                           ✓ 63 correctas · 0 fallidas
-load-test (12 personas)             ✓ 141 peticiones · 0 errores · p50 19 ms · p95 31 ms
+edge-test                           ✓ 65 correctas · 0 fallidas
+load-test (12 personas)             ✓ 141 peticiones · 0 errores · p50 16 ms · p95 30 ms
                                     ✓ 12/12 objetivos · 0 auto-asignaciones · matriz válida
-failure-test                        ✓ 9 correctas · 0 fallidas (503 en 5 s, 500 claro sin config)
-wrangler deploy --dry-run           ✓ 7 assets · 31,88 KiB (9,14 KiB gzip) · env.ASSETS
+failure-test                        ✓ 12 correctas · 0 fallidas
+wrangler deploy --dry-run           ✓ 7 assets · 31,62 KiB (9,08 KiB gzip) · env.DB + env.ASSETS
 wrangler pages functions build      ✓ el shim de Pages también compila (respaldo)
 ```
 
-### Coste real de Upstash (medido, no estimado)
+### Consumo real de D1 (medido, no estimado)
 
-Upstash factura **por comando**. Medido con 12 personas latiendo cada 2 s:
+D1 factura **por fila leída y por fila escrita** (5.000.000 lecturas y 100.000
+escrituras al día en el plan gratuito). Medido con 12 personas latiendo cada 2 s:
 
-| Ajuste | Sensación | ~Comandos / persona·hora | Sesiones de 3 h al mes (plan gratis de 500.000) |
-| --- | --- | --- | --- |
-| `TICK_MS=2000` (por defecto) | instantáneo | ~5.800 | ~3 |
-| `TICK_MS=4000` | rápido | ~4.100 | ~4,5 |
-| `TICK_MS=6000` + `HEARTBEAT_MS=15000` | aceptable | ~2.400 | ~7 |
+| Métrica | Medido | % del cupo diario de una sesión de 3 h |
+| --- | --- | --- |
+| Lecturas por persona·hora | ~48.700 | — |
+| Escrituras por persona·hora | ~1.060 | — |
+| Sesión de 3 h (12 personas) | ~1,75 M lecturas · ~38.000 escrituras | **35 %** lecturas · **38 %** escrituras |
 
-Los intervalos se cambian **sin tocar código** (variables de entorno del proyecto,
-o `--binding TICK_MS=4000` en local). Para nuestro grupo (una sesión de vez en
-cuando) el plan gratuito sobra; si empezáis a usarlo cada semana, sube `TICK_MS`.
+Optimización aplicada con esta medición en la mano: se quitó el índice sobre
+`last_seen` (D1 suma +1 fila escrita por cada índice afectado, así que **duplicaba**
+el coste de cada latido) y el latido se escribe cada 10 s en vez de cada 5 s
+⇒ **escrituras 145 → 75 en la misma prueba (−48 %)**, sin afectar a la precisión de
+la presencia (la ventana de "en pantalla" sigue en 15 s).
+
+Los intervalos se ajustan **sin tocar código**: `TICK_MS`, `ADMIN_TICK_MS` y
+`HEARTBEAT_MS` en `.dev.vars` (local) o `npx wrangler secret put`/dashboard
+(producción).
 
 ### Checklist manual en el móvil (tras desplegar)
 
@@ -233,20 +246,33 @@ cuando) el plan gratuito sobra; si empezáis a usarlo cada semana, sube `TICK_MS
 
 | Síntoma | Causa probable | Solución |
 | --- | --- | --- |
-| `No se pudo conectar con el almacén de datos` (**503**) | Upstash caído, URL/token erróneos, o **sin saldo** en el plan | Revisa las credenciales REST y el consumo del mes; la app se recupera sola al volver la conexión |
-| La respuesta tarda ~5 s y luego 503 | Upstash acepta pero no responde | Es el **timeout de seguridad**: el invitado nunca se queda colgado; revisa el estado del proveedor |
-| `Falta la configuración de Upstash…` (**500**) | Variables no definidas en el proyecto | `npx wrangler secret put UPSTASH_REDIS_REST_URL` (y el token); en local, en `.dev.vars` |
-| `El servidor no tiene configurados ADMIN_PASSWORD y ADMIN_SECRET` (**500**) | Faltan secretos del panel | Defínelos y vuelve a desplegar (las páginas siguen sirviéndose) |
+| `Falta el binding de D1…` (**500**) | El `wrangler.jsonc` no tiene `d1_databases` o el binding no se llama `DB` | Añade el bloque `d1_databases` (te lo imprime `npm run db:create`) |
+| `No se pudo conectar con el almacén de datos` (**503**) | Tablas ausentes o error persistente de D1 (tras 1 reintento automático) | `npm run db:remote` para (re)aplicar `schema.sql`; revisa los logs con `npx wrangler tail` |
+| `El servidor no tiene configurados ADMIN_PASSWORD y ADMIN_SECRET` (**500**) | Faltan los secretos del panel | `npx wrangler secret put ADMIN_PASSWORD` y `ADMIN_SECRET` (las páginas siguen sirviéndose) |
 | Todo funciona pero el sorteo dice *faltan personas* | Nadie dentro o solo 1 | Hacen falta **2 o más** personas (nadie puede asignarse a sí mismo con 1) |
 | El panel no entra y no da error | Cookie bloqueada (modo privado / WebView) | Abre en el navegador normal; la sesión del jugador ya tiene triple respaldo |
-| Empiezan a aparecer 503 al final del mes | Se agotaron los 500.000 comandos gratis | Sube `TICK_MS`/`HEARTBEAT_MS` (ver tabla de coste) o pasa a pago por uso (0,20 $/100K) |
-| La sala aparece vacía tras días | TTL de inactividad (30 días) | `ROOM_TTL_DAYS` o simplemente vuelve a entrar |
-| Nombre de proyecto ocupado al desplegar | `amigo-secreto` ya existe | `--project-name otro-nombre` y actualiza `name` en `wrangler.toml` |
+| Se acerca al cupo diario de D1 | Muchas personas × muchas horas en el mismo día | Sube `HEARTBEAT_MS` (por defecto 10 s) y/o `TICK_MS`; el cupo se reinicia a diario |
+| Jugadores de hace meses siguen en la lista | Sin TTL: se purgan solo si alguien vuelve a entrar | `ROOM_TTL_DAYS` (30 por defecto) o el botón **Reiniciar ronda → expulsar a todos** |
+| `A worker with the name "amigosecreto" already exists` | Ya tienes ese Worker | Cambia `name` en `wrangler.jsonc` (o despliega con `--name otro`) |
 
 ---
 
 ## 📌 Historial
 
+- **v1.3.0 — almacenamiento en Cloudflare D1 (adiós a las cuentas externas)**:
+  - `schema.sql` (3 tablas + claves compuestas) aplicado en local y en remoto con
+    `wrangler d1 execute`; **sin credenciales**: la base es un binding.
+  - Capa de datos reescrita sobre `db.batch`: **1 ida y vuelta** por lectura y
+    **sorteo atómico** (borrar + insertar + cambiar estado, todo o nada).
+  - El latido pasó a ser un `UPDATE` de una fila (sin carreras al entrar varios).
+  - La matriz de auditoría y el objetivo propio salen en **una consulta con JOIN**.
+  - Sin TTL de Redis: se purga a quien no vuelve (`ROOM_TTL_DAYS`) al entrar otro.
+  - **Consumo medido** (12 personas × 3 h): 35 % de las lecturas y 38 % de las
+    escrituras del cupo diario gratuito, tras quitar el índice de `last_seen`
+    (−48 % de escrituras) y latir cada 10 s.
+  - Verificación en el destino Workers: **29 + 65 + 12** comprobaciones en verde y
+    `--dry-run` de 31,62 KiB con `env.DB` + `env.ASSETS`.
+  - Se elimina el mock de Upstash (D1 se simula en local con SQLite).
 - **v1.2.0 — migración a Cloudflare Workers y publicación en GitHub**:
   - `src/worker.ts` es ahora el backend único (mismo monolito + adaptador
     `export default { fetch }`); `functions/api/[[path]].ts` queda como shim de

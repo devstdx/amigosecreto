@@ -6,11 +6,13 @@
  *
  *  Despliegue:
  *     npx wrangler login
- *     npx wrangler secret put UPSTASH_REDIS_REST_URL      (y TOKEN, ADMIN_PASSWORD, ADMIN_SECRET)
+ *     npm run db:create                  # imprime el database_id → pégalo abajo
+ *     npm run db:remote                  # aplica schema.sql en la D1 de producción
+ *     npx wrangler secret put ADMIN_PASSWORD   (y ADMIN_SECRET)
  *     npm run deploy                     # wrangler deploy
  *
  *  Local:
- *     npm run mock &                     # Upstash de mentira con contador de comandos
+ *     npm run db:local                   # esquema en la D1 simulada (SQLite)
  *     npm run dev                        # http://localhost:8788  ·  /admin
  *
  *  Notas:
@@ -31,6 +33,13 @@
     "binding": "ASSETS",
     "run_worker_first": ["/api/*"]
   },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "amigosecreto",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
   "observability": {
     "enabled": true
   }

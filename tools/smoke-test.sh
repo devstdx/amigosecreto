@@ -3,9 +3,8 @@
 #  Smoke test end-to-end de la API (contra el runtime local de Cloudflare)
 # ============================================================================
 #  Uso:
-#    1) node tools/mock-upstash.mjs &        (o una base Upstash real en .dev.vars)
-#    2) npm run dev                            # wrangler dev --port 8788
-#    3) bash tools/smoke-test.sh               (o: bash tools/smoke-test.sh https://mi-worker.workers.dev)
+#    1) npm run db:local && npm run dev        (D1 local + runtime de Cloudflare)
+#    2) bash tools/smoke-test.sh               (o: bash tools/smoke-test.sh https://mi-worker.workers.dev)
 #
 #  Verifica: sesión persistente, IP/dispositivo, presencia, sorteo SIN
 #  auto-asignaciones, matriz de auditoría, emoji, expulsión y reinicio de ronda.

@@ -6,14 +6,15 @@
  *  Un único archivo con TODO el servidor:
  *    · Router de /api/*
  *    · Dominio de la sala ÚNICA (estado, jugadores, sorteo, rondas)
- *    · Cliente HTTP mínimo del REST de Upstash (1 petición = pipeline)
+ *    · Capa de datos sobre Cloudflare **D1** (SQLite): 1 `batch` = 1 ida y vuelta
+ *      y **atómico** (el sorteo no puede quedar a medias)
  *    · Sesiones de jugador (cookie 1 año + localStorage/header de respaldo)
  *    · Panel de administración (login con HMAC, IP, UA, emoji, activo/inactivo)
  *
  *  Decisiones de ingeniería (por qué así):
- *   1. Sin dependencias npm en runtime (solo `fetch` + Web Crypto) ⇒ bundle
- *      mínimo, cold start mínimo y nada que pueda romper al empaquetar.
- *   2. Sin `nodejs_compat` (no se usa ningún módulo de Node) ⇒ menos coste.
+ *   1. Sin dependencias npm en runtime (solo D1 + Web Crypto) ⇒ bundle mínimo,
+ *      cold start mínimo y nada que pueda romper al empaquetar.
+ *   2. Sin `nodejs_compat` (D1 es API nativa) ⇒ menos coste.
  *   3. El id del jugador es un token bearer (UUID v4, 122 bits) y NUNCA se
  *      expone públicamente: hacia fuera se usa un seudónimo `pid` derivado
  *      con FNV-1a y un secreto (estable, no reversible).
@@ -22,23 +23,27 @@
  *   5. Sorteo por derangement (Fisher–Yates + shift circular) ⇒ NADIE se
  *      asigna a sí mismo, siempre, para cualquier n >= 2.
  *
- *  Variables de entorno (secrets de Pages):
- *    UPSTASH_REDIS_REST_URL    · URL REST de la base Upstash
- *    UPSTASH_REDIS_REST_TOKEN  · token REST de Upstash
- *    ADMIN_PASSWORD            · contraseña del panel /admin
- *    ADMIN_SECRET              · secreto para firmar cookies y pseudónimos
- *    ROOM_ID                   · (opcional) id de la sala, por defecto "main"
- *    ROOM_TTL_DAYS             · (opcional) días de vida del estado, por defecto 30
+ *  Configuración:
+ *    DB              · binding de D1 (wrangler.jsonc → d1_databases.binding = "DB")
+ *    ADMIN_PASSWORD  · secret: contraseña del panel /admin
+ *    ADMIN_SECRET    · secret: firma las cookies (HMAC) y los pseudónimos
+ *    ROOM_ID         · (opcional) id de la sala, por defecto "main"
+ *    ROOM_TTL_DAYS   · (opcional) días para purgar a quien no vuelve, por defecto 30
+ *    TICK_MS / ADMIN_TICK_MS / HEARTBEAT_MS · (opcionales) ajustes de frecuencia
+ *    DEBUG_USAGE     · (opcional, solo pruebas) expone /api/admin/usage
  * ============================================================================
  */
 
 interface Env {
-  UPSTASH_REDIS_REST_URL: string;
-  UPSTASH_REDIS_REST_TOKEN: string;
+  /** Base de datos D1 (wrangler.jsonc → d1_databases.binding = "DB"). */
+  DB: D1Database;
   ADMIN_PASSWORD?: string;
   ADMIN_SECRET?: string;
   ROOM_ID?: string;
+  /** Días de inactividad antes de purgar a quien no volvió (por defecto 30). */
   ROOM_TTL_DAYS?: string;
+  /** Solo para pruebas locales: expone /api/admin/usage (filas leídas/escritas). */
+  DEBUG_USAGE?: string;
   /** Ajustes finos de coste (ms). Opcionales: tienen valores por defecto. */
   TICK_MS?: string;
   ADMIN_TICK_MS?: string;
@@ -58,15 +63,11 @@ interface ApiContext {
   next: () => Promise<Response>;
 }
 
-/** Una orden del protocolo Redis en formato REST: ["HSET", clave, campo, valor] */
-type Cmd = (string | number)[];
-
-/** Corte de seguridad: si el upstream no responde en 5 s se degrada a 503. */
-const UPSTREAM_TIMEOUT_MS = 5000;
-
 /* ============================== CONSTANTES ============================== */
 
 const DEFAULT_ROOM_ID = "main";
+
+/** Días de inactividad tras los cuales se purga una persona que no volvió. */
 const DEFAULT_TTL_DAYS = 30;
 
 /** Personas mínimas para poder sortear (con 2 ya es un derangement válido). */
@@ -80,8 +81,11 @@ const ADMIN_MAX_AGE = 60 * 60 * 24 * 30; // sesión de admin: 30 días
 /** Latidos: el estado se recalcula en cada lectura, sin cron. */
 const ONLINE_MS = 15_000; // visto hace < 15 s y visible  ⇒ EN PANTALLA
 const STALE_MS = 60_000; // visto hace >= 60 s           ⇒ DESCONECTADO
-/** El servidor solo escribe el latido cada 5 s aunque el cliente pulse cada 2 s. */
-const WRITE_EVERY_MS = 5_000;
+/** El servidor solo escribe el latido cada 10 s aunque el cliente pulse cada 2 s.
+ *  D1 factura por fila escrita: el doble de intervalo ⇒ la mitad de escrituras.
+ *  Sigue por debajo de la ventana de presencia (ONLINE_MS = 15 s), así que el
+ *  panel no muestra a nadie como "inactivo" mientras está en pantalla. */
+const WRITE_EVERY_MS = 10_000;
 
 const PUBLIC_TICK_MS = 2000;
 const ADMIN_TICK_MS = 3000;
@@ -323,123 +327,105 @@ function describeDevice(userAgent: string): string {
   return browser ? `${os} · ${browser}${inApp}` : `${os}${inApp}`;
 }
 
-/* ========================= CLIENTE UPSTASH (REST) ========================= */
+/* ============================== CLIENTE D1 (SQL) ============================== */
 /**
- * El REST de Upstash acepta un array de órdenes en el cuerpo y las ejecuta en
- * forma de pipeline, devolviendo un array de resultados en el mismo orden.
- * Una sola petición HTTP ⇒ 1 RTT para leer todo el estado de la sala.
+ * Cloudflare D1 (SQLite gestionado) sustituye al REST de Upstash:
+ *   · `db.batch([...])` ejecuta TODAS las sentencias en una sola ida y vuelta y
+ *     de forma **atómica** ⇒ el sorteo no puede quedar a medias.
+ *   · El latido es un UPDATE de una única fila (sin leer-modificar-escribir) ⇒
+ *     no hay carreras cuando entran varias personas a la vez.
+ *   · D1 factura por **fila leída/escrita**, no por comando.
  */
-async function redis(env: Env, commands: Cmd[]): Promise<unknown[]> {
-  const url = (env.UPSTASH_REDIS_REST_URL || "").replace(/\/+$/, "");
-  const token = env.UPSTASH_REDIS_REST_TOKEN || "";
-  if (!url || !token) {
+function db(env: Env): D1Database {
+  const database = env.DB;
+  if (!database) {
     throw new ConfigError(
-      "Falta la configuración de Upstash (UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN)."
+      'Falta el binding de D1. Añade en wrangler.jsonc: "d1_databases": [{ "binding": "DB", "database_name": "amigosecreto", "database_id": "…" }]'
     );
   }
-  if (commands.length === 0) return [];
-
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(commands),
-      /* Si Upstash se cuelga, abortamos: mejor un 503 en 5 s que una pantalla
-         de "cargando" infinita en el móvil del invitado. */
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-    });
-  } catch (cause) {
-    console.error("[upstash] fetch falló o expiró:", cause);
-    throw new UpstreamError();
-  }
-
-  if (!response.ok) {
-    let detail = "";
-    try {
-      detail = await response.text();
-    } catch {
-      detail = "<sin cuerpo>";
-    }
-    console.error("[upstash] HTTP", response.status, detail.slice(0, 300));
-    throw new UpstreamError();
-  }
-
-  let payload: unknown;
-  try {
-    payload = await response.json();
-  } catch (cause) {
-    console.error("[upstash] respuesta no JSON:", cause);
-    throw new UpstreamError();
-  }
-
-  const list: unknown[] = Array.isArray(payload) ? payload : [payload];
-  return list.map((entry) => {
-    if (entry && typeof entry === "object" && "error" in (entry as Record<string, unknown>)) {
-      const message = String((entry as Record<string, unknown>).error);
-      console.error("[upstash] error de comando:", message);
-      throw new UpstreamError();
-    }
-    if (entry && typeof entry === "object" && "result" in (entry as Record<string, unknown>)) {
-      const result = (entry as Record<string, unknown>).result;
-      return result === undefined ? null : result;
-    }
-    return entry;
-  });
+  return database;
 }
 
-/** Decodifica un valor que puede venir como string JSON o ya como objeto. */
-function decodeJson<T>(raw: unknown): T | null {
-  if (raw === null || raw === undefined) return null;
-  if (typeof raw === "string") {
+/** Errores de D1 que merecen un reintento (transitorios). */
+const TRANSIENT_D1 = /D1_ERROR|internal error|network|timed? ?out|overloaded|storage|too many/i;
+
+/**
+ * Ejecuta una operación contra D1 con UN reintento si el fallo parece
+ * transitorio (práctica recomendada por Cloudflare) y, si persiste, lo traduce
+ * a un 503 con mensaje claro en lugar de una traza.
+ */
+async function query<T>(operation: () => Promise<T>): Promise<T> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      return JSON.parse(raw) as T;
-    } catch {
-      return null;
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[d1] intento ${attempt + 1} falló:`, message);
+      if (attempt === 0 && TRANSIENT_D1.test(message)) {
+        await sleep(120);
+        continue;
+      }
+      throw new UpstreamError();
     }
   }
-  if (typeof raw === "object") return raw as T;
-  return null;
+  console.error("[d1] error persistente:", lastError);
+  throw new UpstreamError();
+}
+
+/* --------------------- consumo (solo con DEBUG_USAGE=1) --------------------- */
+const usage = { queries: 0, rowsRead: 0, rowsWritten: 0, durationMs: 0 };
+
+function trackUsage(env: Env, results: D1Result<unknown>[]): void {
+  if (env.DEBUG_USAGE !== "1") return;
+  for (const result of results) {
+    usage.queries += 1;
+    usage.rowsRead += Number(result.meta?.rows_read ?? 0);
+    usage.rowsWritten += Number(result.meta?.rows_written ?? 0);
+    usage.durationMs += Number(result.meta?.duration ?? 0);
+  }
 }
 
 /**
- * Normaliza HGETALL: Upstash puede devolver un objeto {campo: valor} o un
- * array plano [campo, valor, campo, valor] (formato RESP2). Ambos se aceptan.
+ * Único punto de acceso a la base: todo va por `batch`, así que siempre hay
+ * UNA ida y vuelta, atomicidad por lote y contabilidad de consumo en un sitio.
  */
-function entriesOf(raw: unknown): Array<[string, unknown]> {
-  if (Array.isArray(raw)) {
-    const out: Array<[string, unknown]> = [];
-    for (let i = 0; i + 1 < raw.length; i += 2) out.push([String(raw[i]), raw[i + 1]]);
-    return out;
-  }
-  if (raw && typeof raw === "object") {
-    return Object.keys(raw as Record<string, unknown>).map((key) => [
-      key,
-      (raw as Record<string, unknown>)[key],
-    ]);
-  }
-  return [];
+async function runBatch(env: Env, statements: D1PreparedStatement[]): Promise<D1Result<unknown>[]> {
+  if (statements.length === 0) return [];
+  const results = await query(() => db(env).batch(statements));
+  trackUsage(env, results);
+  return results;
 }
 
-/* ============================== CLAVES ============================== */
+/** Fila de `players` tal y como la devuelve D1. */
+interface PlayerRow {
+  player_id: string;
+  name: string;
+  emoji: string;
+  ip: string;
+  ua: string;
+  joined_at: number;
+  last_seen: number;
+  visible: number;
+}
+
+/* Los valores de SQLite llegan ya tipados: no hace falta deserializar JSON. */
+
+/* ============================== CLAVES / SALA ============================== */
 
 function roomId(env: Env): string {
   return (env.ROOM_ID || DEFAULT_ROOM_ID).trim() || DEFAULT_ROOM_ID;
 }
 
-const keyState = (env: Env) => `room:${roomId(env)}:state`;
-const keyPlayers = (env: Env) => `room:${roomId(env)}:players`;
-const keyAssign = (env: Env) => `room:${roomId(env)}:assign`;
-const keyRound = (env: Env) => `room:${roomId(env)}:round`;
-const keyDrawnAt = (env: Env) => `room:${roomId(env)}:drawnAt`;
-
-function ttlSeconds(env: Env): number {
+/**
+ * D1 no tiene TTL: en cada alta se purga a quien no se le ve desde hace
+ * ROOM_TTL_DAYS días (normalmente 0 filas, así que cuesta 0 escrituras).
+ */
+function purgeBefore(env: Env, now: number): number {
   const days = Number(env.ROOM_TTL_DAYS || DEFAULT_TTL_DAYS);
   const safeDays = Number.isFinite(days) && days > 0 ? days : DEFAULT_TTL_DAYS;
-  return Math.round(safeDays * 24 * 60 * 60);
+  return now - Math.round(safeDays * 24 * 60 * 60 * 1000);
 }
 
 /**
@@ -461,16 +447,7 @@ const writeIntervalMs = (env: Env) => intervalMs(env, "HEARTBEAT_MS", WRITE_EVER
 
 /* ============================== MODELO ============================== */
 
-/** Registro persistido: claves cortas para que el JSON sea diminuto. */
-interface StoredPlayer {
-  n: string; // nombre
-  e: string; // emoji
-  ip: string;
-  ua: string;
-  at: number; // joinedAt (ms)
-  ls: number; // lastSeen (ms)
-  v: boolean | 0 | 1; // visible (admitimos boolean por robustez al deserializar)
-}
+/* Los registros viven en tablas: `PlayerRow` (arriba) es su forma en la base. */
 
 interface Player {
   id: string;
@@ -506,71 +483,66 @@ function statusOf(player: Player, now: number): Presence {
 /* ============================== LECTURA DE SALA ============================== */
 
 /**
- * Lee la sala completa en UNA sola petición HTTP.
- *  · modo público (2 comandos): estado + jugadores. Es lo que necesitan el
- *    latido, el alta y los ajustes del panel.
- *  · modo completo (4 comandos): añade ronda y fecha del sorteo (sorteo/panel).
- * Upstash factura POR COMANDO, así que el modo público recorta el coste del
- * polling a la mitad sin perder ninguna funcionalidad del jugador.
- * `extra` permite añadir órdenes al mismo pipeline (p. ej. HLEN en el panel).
+ * Lee toda la sala en UNA sola llamada (`batch` = 1 ida y vuelta):
+ *   1 fila de `room_state` + N filas de `players` (+ el recuento de asignaciones
+ *   solo cuando lo pide el panel). D1 factura por fila leída.
  */
 async function readRoom(
   env: Env,
-  full = true,
-  extra: Cmd[] = []
-): Promise<{ room: Room; extra: unknown[] }> {
-  const base: Cmd[] = full
-    ? [
-        ["GET", keyState(env)],
-        ["GET", keyRound(env)],
-        ["GET", keyDrawnAt(env)],
-        ["HGETALL", keyPlayers(env)],
-      ]
-    : [
-        ["GET", keyState(env)],
-        ["HGETALL", keyPlayers(env)],
-      ];
+  options: { assignedCount?: boolean } = {}
+): Promise<{ room: Room; assigned: number | null }> {
+  const database = db(env);
+  const id = roomId(env);
 
-  const results = await redis(env, [...base, ...extra]);
-
-  const rawState = results[0];
-  const rawRound = full ? results[1] : null;
-  const rawDrawnAt = full ? results[2] : null;
-  const rawPlayers = results[full ? 3 : 1];
-
-  const players: Player[] = [];
-
-  for (const [id, raw] of entriesOf(rawPlayers)) {
-    const stored = decodeJson<StoredPlayer>(raw);
-    if (!stored || typeof stored.n !== "string") continue;
-    players.push({
-      id,
-      pid: "",
-      name: stored.n,
-      emoji: typeof stored.e === "string" && stored.e ? stored.e : EMOJIS[0],
-      ip: typeof stored.ip === "string" ? stored.ip : "",
-      ua: typeof stored.ua === "string" ? stored.ua : "",
-      device: describeDevice(typeof stored.ua === "string" ? stored.ua : ""),
-      joinedAt: Number(stored.at) || 0,
-      lastSeen: Number(stored.ls) || 0,
-      visible: stored.v === 1 || stored.v === true,
-    });
+  const statements: D1PreparedStatement[] = [
+    database.prepare("SELECT state, round, drawn_at FROM room_state WHERE id = ?").bind(id),
+    database
+      .prepare(
+        "SELECT player_id, name, emoji, ip, ua, joined_at, last_seen, visible FROM players WHERE room_id = ? ORDER BY joined_at, name"
+      )
+      .bind(id),
+  ];
+  if (options.assignedCount) {
+    statements.push(
+      database.prepare("SELECT COUNT(*) AS total FROM assignments WHERE room_id = ?").bind(id)
+    );
   }
 
-  players.sort((a, b) => a.joinedAt - b.joinedAt || a.name.localeCompare(b.name, "es"));
+  const results = await runBatch(env, statements);
+
+  const stateRow = (results[0]?.results?.[0] ?? null) as {
+    state?: string;
+    round?: number;
+    drawn_at?: number | null;
+  } | null;
+  const rows = (results[1]?.results ?? []) as PlayerRow[];
+  const assignedCount = options.assignedCount
+    ? Number((results[2]?.results?.[0] as { total?: number } | undefined)?.total ?? 0)
+    : null;
 
   const secret = env.ADMIN_SECRET || "amigo-secreto";
-  for (const player of players) player.pid = pseudonym(secret, player.id);
+  const players: Player[] = rows.map((row) => ({
+    id: row.player_id,
+    pid: pseudonym(secret, row.player_id),
+    name: row.name,
+    emoji: row.emoji || EMOJIS[0],
+    ip: row.ip || "",
+    ua: row.ua || "",
+    device: describeDevice(row.ua || ""),
+    joinedAt: Number(row.joined_at) || 0,
+    lastSeen: Number(row.last_seen) || 0,
+    visible: Number(row.visible) === 1,
+  }));
 
   const room: Room = {
-    exists: typeof rawState === "string" && rawState.length > 0,
-    state: rawState === "DRAWN" ? "DRAWN" : "LOBBY",
-    round: Number(rawRound) || 1,
-    drawnAt: Number(rawDrawnAt) || 0,
+    exists: stateRow !== null,
+    state: stateRow && stateRow.state === "DRAWN" ? "DRAWN" : "LOBBY",
+    round: stateRow && stateRow.round ? Number(stateRow.round) : 1,
+    drawnAt: stateRow && stateRow.drawn_at ? Number(stateRow.drawn_at) : 0,
     players,
   };
 
-  return { room, extra: results.slice(base.length) };
+  return { room, assigned: assignedCount };
 }
 
 /** Proyección pública: SIN ids reales (solo pseudónimos), sin IP ni UA.
@@ -750,7 +722,7 @@ async function handleState(
 ): Promise<Response> {
   const meId = resolvePlayerId(request, body);
   const now = Date.now();
-  const { room } = await readRoom(env, false);
+  const { room } = await readRoom(env);
   const me = meId ? room.players.find((player) => player.id === meId) ?? null : null;
 
   if (heartbeat && me) {
@@ -763,21 +735,19 @@ async function handleState(
       now - me.lastSeen > writeIntervalMs(env);
 
     if (needsWrite) {
-      const stored: StoredPlayer = {
-        n: me.name,
-        e: wantedEmoji ?? me.emoji,
-        ip: me.ip,
-        ua: me.ua,
-        at: me.joinedAt,
-        ls: now,
-        v: wantedVisible ? 1 : 0,
-      };
-      /* Un solo comando por latido: el TTL (30 días) se renueva en el alta y en
-         el sorteo, no hace falta gastar dos EXPIRE cada 5 segundos. */
-      await redis(env, [["HSET", keyPlayers(env), me.id, JSON.stringify(stored)]]);
+      const nextEmoji = wantedEmoji ?? me.emoji;
+      /* Un único UPDATE de una fila: sin leer-modificar-escribir (no hay
+         carreras con otras altas) y sin tocar el resto de la sala. */
+      await runBatch(env, [
+        db(env)
+          .prepare(
+            "UPDATE players SET last_seen = ?, visible = ?, emoji = ? WHERE room_id = ? AND player_id = ?"
+          )
+          .bind(now, wantedVisible ? 1 : 0, nextEmoji, roomId(env), me.id),
+      ]);
       me.lastSeen = now;
       me.visible = wantedVisible;
-      me.emoji = stored.e;
+      me.emoji = nextEmoji;
     }
   }
 
@@ -802,7 +772,7 @@ async function handleJoin(
 
   const ip = clientIp(request);
   const userAgent = request.headers.get("User-Agent") || "";
-  const { room } = await readRoom(env, false);
+  const { room } = await readRoom(env);
 
   const requestedId = resolvePlayerId(request, payload);
   const previous = requestedId
@@ -816,28 +786,38 @@ async function handleJoin(
   const now = Date.now();
   const id = previous ? previous.id : crypto.randomUUID();
   const emoji = parseEmoji(payload.e) ?? (previous ? previous.emoji : EMOJIS[0]);
-  const ttl = ttlSeconds(env);
+  const roomCode = roomId(env);
+  const joinedAt = previous ? previous.joinedAt : now;
+  const finalIp = ip !== "—" ? ip : previous ? previous.ip : "—";
+  const finalUa = userAgent || (previous ? previous.ua : "");
 
-  const stored: StoredPlayer = {
-    n: name,
-    e: emoji,
-    ip: ip !== "—" ? ip : previous ? previous.ip : "—",
-    ua: userAgent || (previous ? previous.ua : ""),
-    at: previous ? previous.joinedAt : now,
-    ls: now,
-    v: 1,
-  };
-
-  const commands: Cmd[] = [
-    ["HSET", keyPlayers(env), id, JSON.stringify(stored)],
-    ["EXPIRE", keyPlayers(env), ttl],
-    ["EXPIRE", keyState(env), ttl],
-  ];
-  if (!room.exists) {
-    commands.push(["SET", keyState(env), "LOBBY", "EX", ttl]);
-    commands.push(["SET", keyRound(env), "1", "EX", ttl]);
-  }
-  await redis(env, commands);
+  /* Un solo `batch` atómico:
+     1. asegura la fila de la sala (0 escrituras si ya existe),
+     2. alta o actualización de la persona (UPSERT por clave compuesta),
+     3. purga de quien no aparece desde hace ROOM_TTL_DAYS (normalmente 0 filas). */
+  await runBatch(env, [
+    db(env)
+      .prepare(
+        "INSERT INTO room_state (id, state, round, updated_at) VALUES (?, 'LOBBY', 1, ?) ON CONFLICT(id) DO NOTHING"
+      )
+      .bind(roomCode, now),
+    db(env)
+      .prepare(
+        `INSERT INTO players (room_id, player_id, name, emoji, ip, ua, joined_at, last_seen, visible)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+         ON CONFLICT(room_id, player_id) DO UPDATE SET
+           name = excluded.name,
+           emoji = excluded.emoji,
+           ip = excluded.ip,
+           ua = excluded.ua,
+           last_seen = excluded.last_seen,
+           visible = 1`
+      )
+      .bind(roomCode, id, name, emoji, finalIp, finalUa, joinedAt, now),
+    db(env)
+      .prepare("DELETE FROM players WHERE room_id = ? AND last_seen < ?")
+      .bind(roomCode, purgeBefore(env, now)),
+  ]);
 
   return json(
     {
@@ -855,7 +835,7 @@ async function handleJoin(
 /**
  * GET /api/target — devuelve ÚNICAMENTE el amigo secreto de quien pregunta.
  * Se llama al iniciar el gesto de "mantener pulsado" (anti shoulder-surfing).
- * Una sola petición HTTP con 2 órdenes: la fila propia + el censo de nombres.
+ * UNA consulta con JOIN: no se lee ninguna otra fila de la sala.
  */
 async function handleTarget(request: Request, env: Env): Promise<Response> {
   const meId = resolvePlayerId(request, null);
@@ -863,31 +843,28 @@ async function handleTarget(request: Request, env: Env): Promise<Response> {
     return fail(401, "No encontramos tu sesión. Vuelve a entrar con tu nombre.");
   }
 
-  const [rawTargetId, rawPlayers] = await redis(env, [
-    ["HGET", keyAssign(env), meId],
-    ["HGETALL", keyPlayers(env)],
+  const results = await runBatch(env, [
+    db(env)
+      .prepare(
+        `SELECT t.name AS name, t.emoji AS emoji
+           FROM assignments a
+           JOIN players t ON t.room_id = a.room_id AND t.player_id = a.target_id
+          WHERE a.room_id = ? AND a.giver_id = ? AND a.giver_id <> a.target_id`
+      )
+      .bind(roomId(env), meId),
   ]);
 
-  const targetId = typeof rawTargetId === "string" ? rawTargetId : null;
-  if (!targetId) {
+  const row = (results[0]?.results?.[0] ?? null) as { name?: string; emoji?: string } | null;
+  if (!row || !row.name) {
+    /* Sin asignación (entró después del sorteo) o el objetivo ya no está:
+       el `AND giver_id <> target_id` garantiza que jamás servimos un auto-regalo. */
     return fail(
       409,
       "Todavía no tienes amigo secreto asignado. Si acabas de entrar, pídele al anfitrión que vuelva a sortear."
     );
   }
-  if (targetId === meId) {
-    // Defensa en profundidad: nunca debería ocurrir (el sorteo es un derangement).
-    return fail(500, "Asignación inválida: avisa al anfitrión para volver a sortear.");
-  }
 
-  for (const [id, raw] of entriesOf(rawPlayers)) {
-    if (id !== targetId) continue;
-    const stored = decodeJson<StoredPlayer>(raw);
-    if (!stored) break;
-    return json({ ok: true, targetName: stored.n, targetEmoji: stored.e || EMOJIS[0] });
-  }
-
-  return fail(409, "Tu amigo secreto ya no está en la sala. Pide un nuevo sorteo.");
+  return json({ ok: true, targetName: row.name, targetEmoji: row.emoji || EMOJIS[0] });
 }
 
 /* ============================== ADMIN ============================== */
@@ -950,9 +927,7 @@ async function handleAdminState(request: Request, env: Env): Promise<Response> {
   if (request.headers.get("X-Admin-Probe") !== null) {
     return json({ ok: true, admin: await isAdmin(request, env) });
   }
-  const { room, extra } = await readRoom(env, true, [["HLEN", keyAssign(env)]]);
-  const assignedRaw = extra[0];
-  const assigned = typeof assignedRaw === "number" ? assignedRaw : Number(assignedRaw) || 0;
+  const { room, assigned } = await readRoom(env, { assignedCount: true });
   return json(adminSnapshot(room, Date.now(), assigned));
 }
 
@@ -974,36 +949,51 @@ async function handleAdminDraw(
 
   const ids = room.players.map((player) => player.id);
   const assignment = buildAssignments(ids);
-  const pairs: Array<string> = [];
-  for (const giver of Object.keys(assignment)) {
-    pairs.push(giver, assignment[giver]);
+  const now = Date.now();
+  const round = room.round + 1;
+  const roomCode = roomId(env);
+
+  /* Un único `batch` ATÓMICO: borrar la matriz anterior, insertar la nueva y
+     marcar la sala como sorteada. Si algo fallara, no se aplica nada: nunca
+     queda una sala "a medio sortear". */
+  const values: Array<string | number> = [];
+  const placeholders: string[] = [];
+  for (const giver of ids) {
+    placeholders.push("(?, ?, ?, ?, ?)");
+    values.push(roomCode, giver, assignment[giver], round, now);
   }
 
-  const ttl = ttlSeconds(env);
-  await redis(env, [
-    ["DEL", keyAssign(env)],
-    ["HSET", keyAssign(env), ...pairs],
-    ["EXPIRE", keyAssign(env), ttl],
-    ["SET", keyState(env), "DRAWN", "EX", ttl],
-    ["SET", keyDrawnAt(env), String(Date.now()), "EX", ttl],
-    ["SET", keyRound(env), String(room.round + 1), "EX", ttl],
-    ["EXPIRE", keyPlayers(env), ttl],
+  await runBatch(env, [
+    db(env).prepare("DELETE FROM assignments WHERE room_id = ?").bind(roomCode),
+    db(env)
+      .prepare(
+        `INSERT INTO assignments (room_id, giver_id, target_id, round, created_at) VALUES ${placeholders.join(", ")}`
+      )
+      .bind(...values),
+    db(env)
+      .prepare(
+        "UPDATE room_state SET state = 'DRAWN', drawn_at = ?, round = ?, updated_at = ? WHERE id = ?"
+      )
+      .bind(now, round, now, roomCode),
   ]);
 
-  return json({ ok: true, total: ids.length, round: room.round + 1 });
+  return json({ ok: true, total: ids.length, round });
 }
 
 /** POST /api/admin/reset — vuelve al lobby (nueva ronda). */
 async function handleAdminReset(env: Env, body: Record<string, unknown> | null): Promise<Response> {
   const keepPlayers = body ? body.keepPlayers !== false : true;
-  const ttl = ttlSeconds(env);
-  const commands: Cmd[] = [
-    ["DEL", keyAssign(env)],
-    ["DEL", keyDrawnAt(env)],
-    ["SET", keyState(env), "LOBBY", "EX", ttl],
+  const roomCode = roomId(env);
+  const statements: D1PreparedStatement[] = [
+    db(env).prepare("DELETE FROM assignments WHERE room_id = ?").bind(roomCode),
+    db(env)
+      .prepare("UPDATE room_state SET state = 'LOBBY', drawn_at = NULL, updated_at = ? WHERE id = ?")
+      .bind(Date.now(), roomCode),
   ];
-  if (!keepPlayers) commands.push(["DEL", keyPlayers(env)]);
-  await redis(env, commands);
+  if (!keepPlayers) {
+    statements.push(db(env).prepare("DELETE FROM players WHERE room_id = ?").bind(roomCode));
+  }
+  await runBatch(env, statements);
   return json({ ok: true, keepPlayers });
 }
 
@@ -1020,14 +1010,25 @@ async function handleAdminPlayer(env: Env, body: Record<string, unknown> | null)
   }
   if (!PID_PATTERN.test(pid)) return fail(400, "Identificador de persona no válido.");
 
-  const { room } = await readRoom(env, false);
+  const { room } = await readRoom(env);
   const player = room.players.find((candidate) => candidate.pid === pid);
   if (!player) return fail(404, "Esa persona ya no está en la sala.");
 
+  const roomCode = roomId(env);
+
   if (action === "kick") {
-    await redis(env, [
-      ["HDEL", keyPlayers(env), player.id],
-      ["HDEL", keyAssign(env), player.id],
+    /* Se borra también su fila en la matriz y las de quien la apuntaba: dejar
+       referencias colgando produciría un 409 incomprensible al sortear. */
+    await runBatch(env, [
+      db(env)
+        .prepare("DELETE FROM players WHERE room_id = ? AND player_id = ?")
+        .bind(roomCode, player.id),
+      db(env)
+        .prepare("DELETE FROM assignments WHERE room_id = ? AND giver_id = ?")
+        .bind(roomCode, player.id),
+      db(env)
+        .prepare("DELETE FROM assignments WHERE room_id = ? AND target_id = ?")
+        .bind(roomCode, player.id),
     ]);
     return json({ ok: true, kicked: pid });
   }
@@ -1036,52 +1037,68 @@ async function handleAdminPlayer(env: Env, body: Record<string, unknown> | null)
   const step = action === "emoji_next" ? 1 : -1;
   const nextIndex = (index < 0 ? 0 : index + step + EMOJIS.length) % EMOJIS.length;
   const emoji = EMOJIS[nextIndex];
-  const ttl = ttlSeconds(env);
 
-  const stored: StoredPlayer = {
-    n: player.name,
-    e: emoji,
-    ip: player.ip,
-    ua: player.ua,
-    at: player.joinedAt,
-    ls: player.lastSeen,
-    v: player.visible ? 1 : 0,
-  };
-  await redis(env, [
-    ["HSET", keyPlayers(env), player.id, JSON.stringify(stored)],
-    ["EXPIRE", keyPlayers(env), ttl],
+  await runBatch(env, [
+    db(env)
+      .prepare("UPDATE players SET emoji = ? WHERE room_id = ? AND player_id = ?")
+      .bind(emoji, roomCode, player.id),
   ]);
   return json({ ok: true, emoji });
 }
 
 /**
+ * GET /api/admin/usage — consumo de D1 desde que arrancó este isolate.
+ * Solo se activa con DEBUG_USAGE=1 (en producción no se define): permite que la
+ * prueba de carga mida FILAS leídas/escritas reales en vez de estimarlas.
+ */
+function handleAdminUsage(env: Env): Response {
+  return json({
+    ok: true,
+    enabled: env.DEBUG_USAGE === "1",
+    queries: usage.queries,
+    rowsRead: usage.rowsRead,
+    rowsWritten: usage.rowsWritten,
+    durationMs: Math.round(usage.durationMs),
+  });
+}
+
+/**
  * GET /api/admin/matrix — auditoría del sorteo: pares dador → receptor.
- * Verifica que NADIE se asignó a sí mismo y ayuda a resolver incidencias.
+ * UNA consulta con dos JOIN: verifica que NADIE se asignó a sí mismo.
  */
 async function handleAdminMatrix(env: Env): Promise<Response> {
-  const [rawAssign, rawPlayers] = await redis(env, [
-    ["HGETALL", keyAssign(env)],
-    ["HGETALL", keyPlayers(env)],
+  const results = await runBatch(env, [
+    db(env)
+      .prepare(
+        `SELECT a.giver_id AS giver_id,
+                a.target_id AS target_id,
+                p.name AS giver_name,
+                t.name AS target_name
+           FROM assignments a
+           LEFT JOIN players p ON p.room_id = a.room_id AND p.player_id = a.giver_id
+           LEFT JOIN players t ON t.room_id = a.room_id AND t.player_id = a.target_id
+          WHERE a.room_id = ?`
+      )
+      .bind(roomId(env)),
   ]);
 
-  const names = new Map<string, string>();
-  for (const [id, raw] of entriesOf(rawPlayers)) {
-    const stored = decodeJson<StoredPlayer>(raw);
-    names.set(id, stored ? stored.n : "(desconocido)");
-  }
+  const rows = (results[0]?.results ?? []) as Array<{
+    giver_id: string;
+    target_id: string;
+    giver_name: string | null;
+    target_name: string | null;
+  }>;
 
-  const pairs: Array<{ from: string; to: string; self: boolean }> = [];
   let selfAssigned = 0;
-  for (const [giverId, rawTargetId] of entriesOf(rawAssign)) {
-    const targetId = String(rawTargetId);
-    const self = giverId === targetId;
+  const pairs = rows.map((row) => {
+    const self = row.giver_id === row.target_id;
     if (self) selfAssigned += 1;
-    pairs.push({
-      from: names.get(giverId) ?? "(desconocido)",
-      to: names.get(targetId) ?? "(desconocido)",
+    return {
+      from: row.giver_name ?? "(desconocido)",
+      to: row.target_name ?? "(desconocido)",
       self,
-    });
-  }
+    };
+  });
 
   return json({
     ok: true,
@@ -1235,6 +1252,10 @@ async function routeRequest(context: ApiContext): Promise<Response> {
       if (path === "admin/player") {
         if (method !== "POST") return methodNotAllowed(["POST"]);
         return handleAdminPlayer(env, await readJsonBody(request));
+      }
+      if (path === "admin/usage") {
+        if (!isRead) return methodNotAllowed(["GET", "HEAD"]);
+        return handleAdminUsage(env);
       }
       if (path === "admin/matrix") {
         if (!isRead) return methodNotAllowed(["GET", "HEAD"]);
