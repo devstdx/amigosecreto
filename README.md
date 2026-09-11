@@ -37,9 +37,11 @@ functions/
   api/[[path]].ts Shim de 3 líneas para desplegar TAMBIÉN en Pages (respaldo).
                   Toda la lógica vive en src/worker.ts: cero duplicación.
 
-wrangler.jsonc    Config de PRODUCCIÓN: main + assets.run_worker_first
-                  + d1_databases (binding DB)
-wrangler.pages.toml  Config del respaldo Pages (se usa solo con --config)
+wrangler.toml     Config OFICIAL de **Pages** (nombre estándar: `wrangler pages`
+                  no admite --config con rutas propias) → pages_build_output_dir
+                  + binding D1 "DB"
+wrangler.jsonc    Config alternativa de **Workers** (conviven sin conflicto):
+                  main + assets + run_worker_first + binding D1
 
 tools/            4 baterías de prueba automatizadas (ver más abajo)
 ```
@@ -58,7 +60,7 @@ un **UPDATE de una fila** (sin carreras al entrar varios a la vez); el sorteo es
 
 ---
 
-## 🚀 Despliegue en producción (Cloudflare **Workers** + **D1**)
+## 🚀 Despliegue en producción (Cloudflare **Pages** + **D1**)
 
 ```bash
 # 1) Dependencias y variables locales (la base de datos no necesita credenciales)
@@ -68,42 +70,51 @@ npm install
 
 # 2) Base de datos LOCAL (SQLite simulado) y prueba con el runtime real
 npm run db:local           # aplica schema.sql a la D1 local
-npm run dev                # http://localhost:8788  ·  /admin
+npm run dev                # wrangler pages dev public → http://localhost:8788 · /admin
 
-# 3) Autenticarse (abre el navegador) y crear la base en tu cuenta
+# 3) Autenticarse (abre el navegador), crear la base y el proyecto
 npx wrangler login
-npm run db:create          # imprime el database_id → pégalo en wrangler.jsonc
+npm run db:create          # imprime el database_id → pégalo en wrangler.toml Y wrangler.jsonc
 npm run db:remote          # aplica schema.sql en la D1 de producción
+npx wrangler pages project create amigosecreto --production-branch main
 
 # 4) Secretos de producción (solo dos)
-npx wrangler secret put ADMIN_PASSWORD
-npx wrangler secret put ADMIN_SECRET
-# (o de golpe:  npx wrangler secret bulk secrets.json)
+npx wrangler pages secret put ADMIN_PASSWORD --project-name amigosecreto
+npx wrangler pages secret put ADMIN_SECRET   --project-name amigosecreto
+# (o de golpe:  npx wrangler pages secret bulk secrets.json --project-name amigosecreto)
 
 # 5) ¡A producción!
-npm run deploy             # wrangler deploy  → https://amigosecreto.<sub>.workers.dev
+npm run deploy             # wrangler pages deploy public
+#    → https://amigosecreto.pages.dev   ·   /admin
 ```
 
-Preflight sin desplegar (verificado en esta auditoría):
+Verificado en local antes de subir (mismo bundle que producción):
 
 ```bash
-npx wrangler deploy --dry-run --outdir=/tmp/build
-# ✨ Read 7 files from the assets directory ./public
-# Total Upload: 31.62 KiB / gzip: 9.08 KiB
-# env.DB (amigosecreto)   D1 Database
-# env.ASSETS              Assets
+npm run verify                                     # 29 + 67 comprobaciones
+BASE=https://amigosecreto.pages.dev ADMIN_PASSWORD=… npm test
 ```
 
-**CI/CD opcional**: dashboard → tu Worker → *Settings → Builds* → conecta el repo
+> ℹ️ Si al probar `https://<proyecto>.pages.dev/api/state` responde
+> `Falta el binding de D1…`, añade el binding a mano en el dashboard:
+> **Workers & Pages → tu proyecto → Settings → Functions → D1 database bindings**
+> → *Production*: variable `DB`, base `amigosecreto` (repite en *Preview* si la
+> quieres) y vuelve a desplegar. El config ya lo declara, así que solo hace falta
+> si la subida directa no lo aplicara.
+
+**Alternativa: Cloudflare Workers** (la misma app, un solo comando). Su config
+convive en `wrangler.jsonc`, así que no hay que tocar nada:
+
+```bash
+npm run dev:workers        # local en :8788
+npm run deploy:workers     # wrangler deploy → https://amigosecreto.<sub>.workers.dev
+npx wrangler secret put ADMIN_PASSWORD     # (y ADMIN_SECRET)
+```
+
+**CI/CD opcional**: dashboard → *Settings → Builds* → conecta el repo
 `devstdx/amigosecreto` (deploy automático en cada push a `main`; los secretos
-viven en el Worker, nunca en el repo). **Rollback**: dashboard → *Deployments →
-Rollback*, o `npx wrangler rollback`.
-
-**Respaldo en Cloudflare Pages** (el mismo código, sin tocar nada):
-
-```bash
-npx wrangler pages deploy public --config wrangler.pages.toml
-```
+viven en Cloudflare, nunca en el repo). **Rollback**: dashboard → *Deployments →
+Rollback*.
 
 | Configuración | Obligatoria | Descripción |
 | --- | --- | --- |
@@ -181,32 +192,32 @@ npx wrangler pages deploy public --config wrangler.pages.toml
 npm run db:local        # aplica schema.sql a la D1 local (SQLite simulado)
 npm run dev &           # runtime real de Cloudflare (workerd) en :8788
 
-npm run verify          # typecheck + ids HTML/JS + 29 pruebas funcionales + 65 adversariales
+npm run verify          # typecheck + ids HTML/JS + 29 pruebas funcionales + 67 adversariales
 npm run test:load       # carga: 12 personas, latencias y consumo real de D1
 npm run test:failures   # fallos: sin binding D1, sin secretos, esquema ausente
-npm run test            # solo las dos baterías de API (29 + 65)
+npm run test            # solo las dos baterías de API (29 + 67)
 ```
 
 | Suite | Qué cubre |
 | --- | --- |
 | `tools/smoke-test.sh` (29) | Camino feliz de punta a punta: altas, IP, dispositivo, presencia, sorteo, reparto, sesión persistente, emojis, reinicio, matriz válida y derangement a escala |
-| `tools/edge-test.sh` (65) | Semántica HTTP (HEAD/OPTIONS/405/404), cuerpos inválidos y de 1 MB, saneado de nombres y XSS, emojis no permitidos, prioridad de `CF-Connecting-IP`, sorteo con 0/1/2 personas, altas posteriores al sorteo, sesiones invalidadas, expulsión, cookies manipuladas/caducadas, límite de intentos, aforo de 60, `run_worker_first` y el binding D1 declarados, cabeceras de seguridad y CSP |
+| `tools/edge-test.sh` (67) | Semántica HTTP (HEAD/OPTIONS/405/404), cuerpos inválidos y de 1 MB, saneado de nombres y XSS, emojis no permitidos, prioridad de `CF-Connecting-IP`, sorteo con 0/1/2 personas, altas posteriores al sorteo, sesiones invalidadas, expulsión, cookies manipuladas/caducadas, límite de intentos, aforo de 60, configs de Pages y Workers con su binding D1, cabeceras de seguridad y CSP |
 | `tools/load-test.mjs` | 12 personas en paralelo durante N segundos: peticiones, errores, p50/p95/p99, auditoría del reparto y **filas leídas/escritas reales de D1** (midiendo el delta con `/api/admin/usage`) |
 | `tools/failure-test.sh` (12) | Sin binding D1 (⇒ 500 con el mensaje exacto, sin trazas), sin `ADMIN_PASSWORD`/`ADMIN_SECRET` (⇒ 500 y las páginas siguen vivas), **esquema ausente** (⇒ 503 controlado sin filtrar errores de SQLite) y recuperación al restaurarlo |
 | `tools/check-ids.mjs` | Cada `el("id")` del JS existe en su HTML (detecta erratas sin navegador) |
 
-**Resultado de la última verificación (runtime real de Cloudflare con D1):**
+**Resultado de la última verificación (runtime real de Cloudflare, destino Pages):**
 
 ```
 typecheck (tsc --noEmit)            ✓ sin errores
-check:ids                           ✓ 15 + 23 ids presentes
+check:ids                           ✓ 16 + 23 ids presentes
 smoke-test                          ✓ 29 correctas · 0 fallidas
-edge-test                           ✓ 65 correctas · 0 fallidas
-load-test (12 personas)             ✓ 141 peticiones · 0 errores · p50 16 ms · p95 30 ms
-                                    ✓ 12/12 objetivos · 0 auto-asignaciones · matriz válida
+edge-test                           ✓ 67 correctas · 0 fallidas
+load-test (12 personas)             ✓ 389 peticiones · 0 errores · draw válido · 12/12 objetivos
+                                    ✓ 0 auto-asignaciones · matriz válida
 failure-test                        ✓ 12 correctas · 0 fallidas
-wrangler deploy --dry-run           ✓ 7 assets · 31,62 KiB (9,08 KiB gzip) · env.DB + env.ASSETS
-wrangler pages functions build      ✓ el shim de Pages también compila (respaldo)
+wrangler pages functions build      ✓ compila el mismo monolito para Pages
+wrangler deploy --dry-run (Workers) ✓ 31,62 KiB (9,08 KiB gzip) · env.DB + env.ASSETS
 ```
 
 ### Consumo real de D1 (medido, no estimado)
@@ -259,6 +270,15 @@ Los intervalos se ajustan **sin tocar código**: `TICK_MS`, `ADMIN_TICK_MS` y
 
 ## 📌 Historial
 
+- **v1.4.0 — destino Pages oficial + revelado persistente**:
+  - **UX**: al completar los 1,2 s el nombre **se queda a la vista** al soltar
+    (antes se ocultaba) y aparece un botón *«Ocultar el nombre»*. Si el gesto se
+    suelta antes de tiempo, se sigue ocultando (protección anti-miradas intacta).
+  - Pages pasa a ser el destino oficial: su config vive en `wrangler.toml`
+    (nombre estándar, porque `wrangler pages` **no admite** `--config` con rutas
+    personalizadas) y la de Workers se queda en `wrangler.jsonc`. **Ambas
+    conviven**: `npm run deploy` (Pages) y `npm run deploy:workers` (Workers).
+  - Verificado sobre Pages con D1: **29 + 67 + 12** comprobaciones en verde.
 - **v1.3.0 — almacenamiento en Cloudflare D1 (adiós a las cuentas externas)**:
   - `schema.sql` (3 tablas + claves compuestas) aplicado en local y en remoto con
     `wrangler d1 execute`; **sin credenciales**: la base es un binding.

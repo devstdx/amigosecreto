@@ -1,0 +1,31 @@
+# ============================================================================
+#  Cloudflare PAGES — configuración OFICIAL del proyecto (nombre estándar)
+# ============================================================================
+#  wrangler pages NO acepta `--config` con rutas personalizadas, así que la
+#  configuración de Pages vive en este archivo con su nombre estándar:
+#
+#     npx wrangler pages dev public            # local  (http://localhost:8788)
+#     npx wrangler pages project create amigosecreto --production-branch main
+#     npx wrangler pages deploy public         # producción
+#
+#  El destino alternativo (Workers) usa wrangler.jsonc, que convive sin
+#  problemas: `npx wrangler deploy` lee ese archivo.
+#
+#  Los secretos NO van aquí: van en .dev.vars (local) y con
+#  `npx wrangler pages secret put ADMIN_PASSWORD --project-name amigosecreto`.
+# ============================================================================
+
+name = "amigo-secreto"
+compatibility_date = "2026-09-01"
+
+# Los estáticos se suben desde public/ y las Pages Functions viven en functions/
+pages_build_output_dir = "public"
+
+# Binding de D1: el database_id lo imprime `npm run db:create`
+# (debe ser el MISMO que en wrangler.jsonc)
+[[d1_databases]]
+binding = "DB"
+database_name = "amigosecreto"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# Nota: no se usa `nodejs_compat` porque el backend solo emplea D1 y Web Crypto.
