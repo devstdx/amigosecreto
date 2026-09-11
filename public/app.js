@@ -14,6 +14,11 @@
   var KEY_EMOJI = "as_emoji";
   var HOLD_MS = 1200;
   var RING_LENGTH = 590.6; /* 2·π·94 */
+  /* El nombre se queda a la vista al revelarlo: solo se oculta si NO se
+     completa el gesto (o si se pulsa «Ocultar el nombre»). */
+  var HINT_READY = "Mantén pulsado 1,2 s para verlo.";
+  var HINT_HOLDING = "¡Sigue pulsando para enfocarlo!";
+  var HINT_REVEALED = "Ya lo tienes a la vista. Pulsa «Ocultar el nombre» si alguien se acerca.";
   var FALLBACK_EMOJIS = [
     "🙂", "😎", "🤠", "🥳", "🤓", "😺", "🐶", "🐼",
     "🦊", "🐸", "🐙", "🦄", "🐝", "🌵", "🌟", "🍕",
@@ -32,7 +37,8 @@
     inFlight: false,
     failures: 0,
     targetName: null,
-    targetState: "idle"
+    targetState: "idle",
+    revealed: false
   };
 
   /* ------------------------------ utilidades ------------------------------ */
@@ -326,10 +332,17 @@
     if (ring) ring.setAttribute("stroke-dashoffset", String(RING_LENGTH * (1 - p)));
   }
 
+  function setHideButton(visible) {
+    el("hide-btn").className = visible ? "btn ghost" : "btn ghost hidden";
+  }
+
   function hideReveal() {
+    state.revealed = false;
+    holding = false;
     el("target-name").textContent = "";
     el("pad-knob").textContent = "🎁";
-    el("reveal-hint").textContent = "Mantén pulsado 1,2 s para verlo. Se oculta al soltar.";
+    el("reveal-hint").textContent = HINT_READY;
+    setHideButton(false);
     paintReveal(0);
   }
 
@@ -344,8 +357,9 @@
     paintReveal(progress);
     if (progress >= 1 && !celebrated) {
       celebrated = true;
-      el("pad-knob").textContent = "🤫";
-      el("reveal-hint").textContent = "¡Sujétalo para verlo! Al soltar se vuelve a ocultar.";
+      state.revealed = true;
+      el("pad-knob").textContent = "🎁";
+      el("reveal-hint").textContent = HINT_REVEALED;
       buzz([70, 40, 120]);
     }
     rafId = window.requestAnimationFrame(holdLoop);
@@ -353,21 +367,35 @@
 
   function beginHold(event) {
     if (event && event.cancelable) event.preventDefault();
-    if (holding) return;
+    /* Si ya está revelado, el gesto no hace nada: se oculta con el botón. */
+    if (holding || state.revealed) return;
     holding = true;
     celebrated = false;
     startedAt = Date.now();
+    setHideButton(false);
     loadTarget();
     if (rafId) window.cancelAnimationFrame(rafId);
     rafId = window.requestAnimationFrame(holdLoop);
   }
 
+  /**
+   * Al soltar:
+   *  · si el gesto se completó → el nombre SE QUEDA A LA VISTA (y aparece el
+   *    botón «Ocultar el nombre» para quien quiera esconderlo otra vez);
+   *  · si se soltó antes de 1,2 s → se oculta (así nadie ve nada por un roce).
+   */
   function endHold() {
     if (!holding) return;
     holding = false;
     if (rafId) {
       window.cancelAnimationFrame(rafId);
       rafId = null;
+    }
+    if (state.revealed) {
+      paintReveal(1);
+      el("reveal-hint").textContent = HINT_REVEALED;
+      setHideButton(true);
+      return;
     }
     hideReveal();
   }
@@ -401,6 +429,7 @@
       if (event.key === " " || event.key === "Enter") beginHold(event);
     });
     pad.addEventListener("keyup", endHold, false);
+    el("hide-btn").onclick = hideReveal;
     hideReveal();
   }
 
