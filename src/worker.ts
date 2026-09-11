@@ -28,7 +28,7 @@
  *    ADMIN_PASSWORD  · secret: contraseña del panel /admin
  *    ADMIN_SECRET    · secret: firma las cookies (HMAC) y los pseudónimos
  *    ROOM_ID         · (opcional) id de la sala, por defecto "main"
- *    ROOM_TTL_DAYS   · (opcional) días para purgar a quien no vuelve, por defecto 30
+ *    ROOM_TTL_HOURS  · (opcional) horas para purgar a quien no vuelve, por defecto 12
  *    TICK_MS / ADMIN_TICK_MS / HEARTBEAT_MS · (opcionales) ajustes de frecuencia
  *    DEBUG_USAGE     · (opcional, solo pruebas) expone /api/admin/usage
  * ============================================================================
@@ -40,8 +40,8 @@ interface Env {
   ADMIN_PASSWORD?: string;
   ADMIN_SECRET?: string;
   ROOM_ID?: string;
-  /** Días de inactividad antes de purgar a quien no volvió (por defecto 30). */
-  ROOM_TTL_DAYS?: string;
+  /** Horas de inactividad antes de purgar a quien no volvió (por defecto 12). */
+  ROOM_TTL_HOURS?: string;
   /** Solo para pruebas locales: expone /api/admin/usage (filas leídas/escritas). */
   DEBUG_USAGE?: string;
   /** Ajustes finos de coste (ms). Opcionales: tienen valores por defecto. */
@@ -67,8 +67,10 @@ interface ApiContext {
 
 const DEFAULT_ROOM_ID = "main";
 
-/** Días de inactividad tras los cuales se purga una persona que no volvió. */
-const DEFAULT_TTL_DAYS = 30;
+/** Limpieza: 12 h por defecto (más que cualquier fiesta, menos que "el mes
+ *  que viene"). Antes eran 30 días: los que entraban y se iban se quedaban
+ *  en la lista como "desconectados" y parecían fantasmas/bots. */
+const DEFAULT_TTL_HOURS = 12;
 
 /** Personas mínimas para poder sortear (con 2 ya es un derangement válido). */
 const MIN_PLAYERS = 2;
@@ -419,12 +421,12 @@ function roomId(env: Env): string {
 
 /**
  * D1 no tiene TTL: en cada alta se purga a quien no se le ve desde hace
- * ROOM_TTL_DAYS días (normalmente 0 filas, así que cuesta 0 escrituras).
+ * ROOM_TTL_HOURS horas (por defecto 12; normalmente 0 filas ⇒ 0 escrituras).
  */
 function purgeBefore(env: Env, now: number): number {
-  const days = Number(env.ROOM_TTL_DAYS || DEFAULT_TTL_DAYS);
-  const safeDays = Number.isFinite(days) && days > 0 ? days : DEFAULT_TTL_DAYS;
-  return now - Math.round(safeDays * 24 * 60 * 60 * 1000);
+  const hours = Number(env.ROOM_TTL_HOURS ?? DEFAULT_TTL_HOURS);
+  const safeHours = Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_TTL_HOURS;
+  return now - Math.round(safeHours * 60 * 60 * 1000);
 }
 
 /**
@@ -792,7 +794,7 @@ async function handleJoin(
   /* Un solo `batch` atómico:
      1. asegura la fila de la sala (0 escrituras si ya existe),
      2. alta o actualización de la persona (UPSERT por clave compuesta),
-     3. purga de quien no aparece desde hace ROOM_TTL_DAYS (normalmente 0 filas). */
+     3. purga de quien no aparece desde hace ROOM_TTL_HOURS (normalmente 0 filas). */
   await runBatch(env, [
     db(env)
       .prepare(
@@ -1045,6 +1047,40 @@ async function handleAdminPlayer(env: Env, body: Record<string, unknown> | null)
 }
 
 /**
+ * POST /api/admin/purge — quita de la sala a quien ya no está (ausentes).
+ * `seconds` marca desde cuándo se considera ausente (por defecto 600 = 10 min;
+ * mínimo 1 y máximo 30 días). Borra también sus filas de la matriz para no
+ * dejar referencias colgando: si la sala estaba sorteada, el panel avisa de que
+ * hay que volver a sortear (ya lo hace con el contador de asignados).
+ */
+async function handleAdminPurge(env: Env, body: Record<string, unknown> | null): Promise<Response> {
+  const raw = Number(body ? body.seconds : 600);
+  const seconds =
+    Number.isFinite(raw) && raw >= 1 ? Math.min(Math.round(raw), 60 * 60 * 24 * 30) : 600;
+  const cutoff = Date.now() - seconds * 1000;
+  const roomCode = roomId(env);
+
+  const results = await runBatch(env, [
+    db(env)
+      .prepare(
+        "DELETE FROM assignments WHERE room_id = ? AND giver_id IN (SELECT player_id FROM players WHERE room_id = ? AND last_seen < ?)"
+      )
+      .bind(roomCode, roomCode, cutoff),
+    db(env)
+      .prepare(
+        "DELETE FROM assignments WHERE room_id = ? AND target_id IN (SELECT player_id FROM players WHERE room_id = ? AND last_seen < ?)"
+      )
+      .bind(roomCode, roomCode, cutoff),
+    db(env)
+      .prepare("DELETE FROM players WHERE room_id = ? AND last_seen < ?")
+      .bind(roomCode, cutoff),
+  ]);
+
+  const purged = Number(results[2]?.meta?.rows_written ?? 0);
+  return json({ ok: true, purged, seconds });
+}
+
+/**
  * GET /api/admin/usage — consumo de D1 desde que arrancó este isolate.
  * Solo se activa con DEBUG_USAGE=1 (en producción no se define): permite que la
  * prueba de carga mida FILAS leídas/escritas reales en vez de estimarlas.
@@ -1190,6 +1226,7 @@ async function routeRequest(context: ApiContext): Promise<Response> {
           "POST /api/admin/draw   { force? }",
           "POST /api/admin/reset  { keepPlayers? }",
           "POST /api/admin/player { p, action }",
+          "POST /api/admin/purge  { seconds? }",
           "GET  /api/admin/matrix",
         ],
       });
@@ -1250,6 +1287,10 @@ async function routeRequest(context: ApiContext): Promise<Response> {
       if (path === "admin/player") {
         if (method !== "POST") return methodNotAllowed(["POST"]);
         return handleAdminPlayer(env, await readJsonBody(request));
+      }
+      if (path === "admin/purge") {
+        if (method !== "POST") return methodNotAllowed(["POST"]);
+        return handleAdminPurge(env, await readJsonBody(request));
       }
       if (path === "admin/usage") {
         if (!isRead) return methodNotAllowed(["GET", "HEAD"]);

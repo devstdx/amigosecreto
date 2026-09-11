@@ -11,7 +11,7 @@ ADMIN_SECRET="cadena-larga-y-aleatoria-de-al-menos-32-caracteres"
 
 # --- Opcionales ---
 # ROOM_ID="main"        # id de la sala única
-# ROOM_TTL_DAYS="30"    # días tras los que se purga a quien no vuelve
+# ROOM_TTL_HOURS="12"   # horas tras las que se purga a quien no vuelve (12 = más que cualquier fiesta)
 
 # --- Control de frecuencia (y por tanto de filas escritas en D1) ---
 # TICK_MS="2000"        # latido del jugador (1000–15000 ms)

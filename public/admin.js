@@ -271,7 +271,13 @@
 
     el("state-badge").className = drawn ? "badge on" : "badge";
     el("state-badge").textContent = drawn ? "sorteado" : "en lobby";
+    var players = snapshot.players || [];
+    var online = players.filter(function (p) {
+      return p.s === "online";
+    }).length;
     el("stat-total").textContent = String(snapshot.total);
+    el("stat-online").textContent = String(online);
+    el("stat-offline").textContent = String(Math.max(0, snapshot.total - online));
     el("stat-assigned").textContent = String(assigned);
     el("stat-min").textContent = String(snapshot.minPlayers);
     el("stat-round").textContent = String(snapshot.round);
@@ -373,6 +379,45 @@
       });
   }
 
+  /**
+   * Quita de la lista a quien ya no está (por defecto: >10 min sin latir).
+   * Los que están en pantalla no se tocan; si alguien vuelve, tendrá que
+   * escribir su nombre otra vez (su sesión ya no existe).
+   */
+  function purgeAbsent() {
+    if (
+      !window.confirm(
+        "¿Quitar de la lista a quienes no están conectados desde hace 10 minutos?\n\n" +
+          "· Los que están en pantalla NO se tocan.\n" +
+          "· Si alguno vuelve, tendrá que escribir su nombre otra vez."
+      )
+    ) {
+      return;
+    }
+    api("/api/admin/purge", { method: "POST", body: { seconds: 600 } })
+      .then(function (result) {
+        var count = Number(result.purged) || 0;
+        alertBox(
+          "draw-error",
+          count === 0
+            ? "No había nadie ausente: la lista ya estaba limpia."
+            : count === 1
+              ? "1 ausente eliminado."
+              : count + " ausentes eliminados.",
+          true
+        );
+        state.rows = {};
+        el("players").innerHTML = "";
+        refresh();
+      })
+      .catch(function (error) {
+        alertBox(
+          "draw-error",
+          error && error.message ? error.message : "No se pudo limpiar la lista."
+        );
+      });
+  }
+
   function cycleEmoji(pid, action) {
     api("/api/admin/player", { method: "POST", body: { p: pid, action: action } })
       .then(function () {
@@ -440,6 +485,7 @@
     };
     el("draw-btn").onclick = draw;
     el("reset-btn").onclick = resetRound;
+    el("purge-btn").onclick = purgeAbsent;
     el("matrix-btn").onclick = showMatrix;
     el("matrix-close").onclick = function () {
       el("matrix-card").className = "card hidden";

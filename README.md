@@ -135,7 +135,7 @@ nada a mano, y los logs del build muestran `env.DB (amigosecreto) D1 Database`.
 | `ADMIN_PASSWORD` | sí (secret) | Contraseña del panel `/admin` |
 | `ADMIN_SECRET` | sí (secret) | Firma las cookies (HMAC-SHA256) y los pseudónimos |
 | `ROOM_ID` | no | Id de la sala (por defecto `main`) |
-| `ROOM_TTL_DAYS` | no | Días tras los que se purga a quien no vuelve (30) |
+| `ROOM_TTL_HOURS` | no | Horas tras las que se purga a quien no vuelve (12) |
 | `TICK_MS` / `ADMIN_TICK_MS` / `HEARTBEAT_MS` | no | Frecuencias (afectan a las filas escritas) |
 | `DEBUG_USAGE` | no | Solo pruebas: expone `/api/admin/usage` |
 
@@ -157,6 +157,7 @@ nada a mano, y los logs del build muestran `env.DB (amigosecreto) D1 Database`.
 | `POST` | `/api/admin/draw` | admin | Sortea a todos (`{ force }` permite repetir) |
 | `POST` | `/api/admin/reset` | admin | `{ keepPlayers }` → vuelve al lobby |
 | `POST` | `/api/admin/player` | admin | `{ p, action: emoji_next \| emoji_prev \| kick }` |
+| `POST` | `/api/admin/purge` | admin | `{ seconds? }` → quita de la sala a los ausentes (por defecto >10 min). También limpia sus filas de la matriz |
 | `GET` | `/api/admin/matrix` | admin | Auditoría del sorteo (pares + auto-asignaciones) |
 
 ---
@@ -205,16 +206,16 @@ nada a mano, y los logs del build muestran `env.DB (amigosecreto) D1 Database`.
 npm run db:local        # aplica schema.sql a la D1 local (SQLite simulado)
 npm run dev &           # runtime real de Cloudflare (workerd) en :8788
 
-npm run verify          # typecheck + ids HTML/JS + 29 pruebas funcionales + 67 adversariales
+npm run verify          # typecheck + ids HTML/JS + 29 pruebas funcionales + 72 adversariales
 npm run test:load       # carga: 12 personas, latencias y consumo real de D1
 npm run test:failures   # fallos: sin binding D1, sin secretos, esquema ausente
-npm run test            # solo las dos baterías de API (29 + 67)
+npm run test            # solo las dos baterías de API (29 + 72)
 ```
 
 | Suite | Qué cubre |
 | --- | --- |
 | `tools/smoke-test.sh` (29) | Camino feliz de punta a punta: altas, IP, dispositivo, presencia, sorteo, reparto, sesión persistente, emojis, reinicio, matriz válida y derangement a escala |
-| `tools/edge-test.sh` (67) | Semántica HTTP (HEAD/OPTIONS/405/404), cuerpos inválidos y de 1 MB, saneado de nombres y XSS, emojis no permitidos, prioridad de `CF-Connecting-IP`, sorteo con 0/1/2 personas, altas posteriores al sorteo, sesiones invalidadas, expulsión, cookies manipuladas/caducadas, límite de intentos, aforo de 60, configs de Pages y Workers con su binding D1, cabeceras de seguridad y CSP |
+| `tools/edge-test.sh` (72) | Semántica HTTP (HEAD/OPTIONS/405/404), cuerpos inválidos y de 1 MB, saneado de nombres y XSS, emojis no permitidos, prioridad de la IP real frente a `X-Forwarded-For` falsificado, sorteo con 0/1/2 personas, altas posteriores al sorteo, sesiones invalidadas, expulsión, **limpieza de ausentes**, cookies manipuladas/caducadas, límite de intentos, aforo de 60, configs de Pages y Workers con su binding D1, cabeceras de seguridad y CSP |
 | `tools/load-test.mjs` | 12 personas en paralelo durante N segundos: peticiones, errores, p50/p95/p99, auditoría del reparto y **filas leídas/escritas reales de D1** (midiendo el delta con `/api/admin/usage`) |
 | `tools/failure-test.sh` (12) | Sin binding D1 (⇒ 500 con el mensaje exacto, sin trazas), sin `ADMIN_PASSWORD`/`ADMIN_SECRET` (⇒ 500 y las páginas siguen vivas), **esquema ausente** (⇒ 503 controlado sin filtrar errores de SQLite) y recuperación al restaurarlo |
 | `tools/check-ids.mjs` | Cada `el("id")` del JS existe en su HTML (detecta erratas sin navegador) |
@@ -261,6 +262,7 @@ Los intervalos se ajustan **sin tocar código**: `TICK_MS`, `ADMIN_TICK_MS` y
 3. Cerrar del todo el navegador y reabrir → entras **directo** a la espera.
 4. Pulsar **Sortear a todos** → cada móvil vibra y muestra su tarjeta.
 5. **Ver matriz** → 0 auto-asignaciones y reparto completo.
+6. Si alguien se va y ves "fantasmas" en la lista → **«Limpiar ausentes»** (no toca a quien está en pantalla).
 6. Añadir a alguien después del sorteo → el panel avisa y ofrece volver a sortear.
 
 
@@ -277,13 +279,22 @@ Los intervalos se ajustan **sin tocar código**: `TICK_MS`, `ADMIN_TICK_MS` y
 | Todo funciona pero el sorteo dice *faltan personas* | Nadie dentro o solo 1 | Hacen falta **2 o más** personas (nadie puede asignarse a sí mismo con 1) |
 | El panel no entra y no da error | Cookie bloqueada (modo privado / WebView) | Abre en el navegador normal; la sesión del jugador ya tiene triple respaldo |
 | Se acerca al cupo diario de D1 | Muchas personas × muchas horas en el mismo día | Sube `HEARTBEAT_MS` (por defecto 10 s) y/o `TICK_MS`; el cupo se reinicia a diario |
-| Jugadores de hace meses siguen en la lista | Sin TTL: se purgan solo si alguien vuelve a entrar | `ROOM_TTL_DAYS` (30 por defecto) o el botón **Reiniciar ronda → expulsar a todos** |
+| Aparece gente que ya no está ("fantasmas") | El estado persiste a propósito: quien entra y se va sigue en la lista como *desconectado* | Botón **«Limpiar ausentes»** (quita a los que no laten desde hace 10 min). Además se purgan solos a las `ROOM_TTL_HOURS` (12 h) en la siguiente alta |
 | `A worker with the name "amigosecreto" already exists` | Ya tienes ese Worker | Cambia `name` en `wrangler.jsonc` (o despliega con `--name otro`) |
 
 ---
 
 ## 📌 Historial
 
+- **v1.4.3 — adiós a los "usuarios fantasma"**:
+  - Nuevo `POST /api/admin/purge` (`{ seconds? }`, por defecto 600) y botón
+    **«Limpiar ausentes»** en el panel: quita a quien ya no está (y sus filas de
+    la matriz para no dejar referencias colgando). No toca a quien está en pantalla.
+  - La purga automática al entrar otra persona pasa de **30 días a 12 horas**
+    (`ROOM_TTL_HOURS`): quien "entró y se fue" ya no aparece semanas después.
+  - El panel muestra el desglose *en la sala / en pantalla / ausentes* para ver de
+    un vistazo quién es real.
+  - Verificado en producción (70/70 adversarial, 2 omitidas por diseño) y en local (72/72).
 - **v1.4.2 — D1 autoconfigurable desde el build**:
   - `npm run db:ensure` (`tools/d1-ensure.mjs`): si el config trae el UUID de
     relleno, busca la base en la cuenta, **la crea si no existe** (WEUR por

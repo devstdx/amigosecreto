@@ -213,6 +213,19 @@ check "expulsar invalida la sesión de esa persona" \
   "$(json me -b "$TMP/bea.jar" -X POST "$BASE/api/tick" -H 'Content-Type: application/json' -d '{}')" "null"
 check "el panel queda vacío tras la expulsión" \
   "$(curl -s -b "$AJAR" "$BASE/api/admin/state" | json total)" "0"
+
+# Limpieza de ausentes (el botón «Limpiar ausentes» del panel)
+join "Fantasma" "🙂" "203.0.113.44" "curl/8" "$TMP/ghost.jar" > /dev/null
+sleep 2
+check "limpiar ausentes elimina a quien ya no está" \
+  "$(curl -s -b "$AJAR" -X POST "$BASE/api/admin/purge" -H 'Content-Type: application/json' \
+      -d '{"seconds":1}' | json purged)" "1"
+check "y la sala se queda limpia" "$(curl -s "$BASE/api/state" | json total)" "0"
+check "limpiar ausentes sin sesión de admin → 401" \
+  "$(code -X POST "$BASE/api/admin/purge" -H 'Content-Type: application/json' -d '{}')" "401"
+check "limpiar ausentes sin nadie ausente → 0 (no toca a los presentes)" \
+  "$(curl -s -b "$AJAR" -X POST "$BASE/api/admin/purge" -H 'Content-Type: application/json' \
+      -d '{}' | json purged)" "0"
 check "acción desconocida en el panel → 400" \
   "$(code -b "$AJAR" -X POST "$BASE/api/admin/player" -H 'Content-Type: application/json' \
       -d '{"p":"deadbeef","action":"hack"}')" "400"
