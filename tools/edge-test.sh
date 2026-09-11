@@ -17,6 +17,13 @@ set -u
 
 BASE="${1:-http://localhost:8788}"
 PASSWORD="${ADMIN_PASSWORD:-prueba123}"
+
+# En local simulamos IPs distintas con CF-Connecting-IP; en producción Cloudflare
+# BLOQUEA esa cabecera (403, "error code: 1000") porque solo la pone él.
+case "$BASE" in
+  *localhost* | *127.0.0.1*) IS_LOCAL=1 ;;
+  *) IS_LOCAL=0 ;;
+esac
 TMP="$(mktemp -d)"
 PASS=0
 FAIL=0
@@ -111,17 +118,27 @@ check "cuerpo de 1 MB no rompe el servidor (400, no 500)" \
 # ------------------------------------------------------- IP real y suplantación
 section "3. IP real frente a cabeceras falsificadas"
 join() { # join nombre emoji ip user-agent jar-de-cookies
-  curl -s -c "$5" -X POST "$BASE/api/join" -H 'Content-Type: application/json' \
-    -H "CF-Connecting-IP: $3" -H "X-Forwarded-For: 1.2.3.4" -H "User-Agent: $4" \
-    -d "{\"n\":\"$1\",\"e\":\"$2\"}"
+  if [ "$IS_LOCAL" = "1" ]; then
+    curl -s -c "$5" -X POST "$BASE/api/join" -H 'Content-Type: application/json' \
+      -H "CF-Connecting-IP: $3" -H "X-Forwarded-For: 1.2.3.4" -H "User-Agent: $4" \
+      -d "{\"n\":\"$1\",\"e\":\"$2\"}"
+  else
+    # En producción solo se puede falsificar X-Forwarded-For (CF-Connecting-IP
+    # lo sobrescribe Cloudflare y rechaza el intento con 403).
+    curl -s -c "$5" -X POST "$BASE/api/join" -H 'Content-Type: application/json' \
+      -H "X-Forwarded-For: 1.2.3.4" -H "User-Agent: $4" \
+      -d "{\"n\":\"$1\",\"e\":\"$2\"}"
+  fi
 }
 join "Suplantador" "🙂" "203.0.113.99" "curl/8" "$TMP/s1.jar" > /dev/null
-check "el panel muestra CF-Connecting-IP y no X-Forwarded-For" \
+check "el panel usa la IP real y descarta X-Forwarded-For (falsificable)" \
   "$(curl -s -b "$AJAR" "$BASE/api/admin/state" | node -e '
      let s="";process.stdin.on("data",(d)=>(s+=d));
      process.stdin.on("end",()=>{const o=JSON.parse(s);const p=o.players.find((x)=>x.n==="Suplantador");
-     console.log(p?p.ip+"|"+/1\.2\.3\.4/.test(JSON.stringify(o)):"sin-jugador");});')" \
-  "203.0.113.99|false"
+     const okIp = p && /^[0-9a-fA-F:.]{7,45}$/.test(p.ip) && p.ip !== "—";
+     const forged = /1\.2\.3\.4/.test(JSON.stringify(o));
+     console.log(okIp && !forged ? "si" : "no (ip=" + (p ? p.ip : "?") + " xff=" + forged + ")");});')" \
+  "si"
 
 # ------------------------------------------------------------------- sorteo
 section "4. Sorteo: casos límite"
@@ -216,16 +233,21 @@ check "cookie de admin malformada → 401" \
   "$(code -H 'Cookie: as_admin=sinpunto' "$BASE/api/admin/state")" "401"
 check "sin cookie → 401" "$(code "$BASE/api/admin/draw")" "401"
 check "sorteo por GET → 405 (o 401)" "$(code -b "$AJAR" "$BASE/api/admin/draw")" "405"
-for i in 1 2 3 4 5 6; do
-  code -X POST "$BASE/api/admin/login" -H 'Content-Type: application/json' \
-    -H 'CF-Connecting-IP: 10.9.9.9' -d '{"password":"fuerza-bruta"}' > /dev/null
-done
-check "tras 6 fallos desde una IP: 429 (límite de intentos)" \
-  "$(code -X POST "$BASE/api/admin/login" -H 'Content-Type: application/json' \
-      -H 'CF-Connecting-IP: 10.9.9.9' -d '{"password":"fuerza-bruta"}')" "429"
-check "el bloqueo no afecta a otras IP" \
-  "$(code -X POST "$BASE/api/admin/login" -H 'Content-Type: application/json' \
-      -H 'CF-Connecting-IP: 10.9.9.10' -d "{\"password\":\"$PASSWORD\"}")" "200"
+if [ "$IS_LOCAL" = "1" ]; then
+  for i in 1 2 3 4 5 6; do
+    code -X POST "$BASE/api/admin/login" -H 'Content-Type: application/json' \
+      -H 'CF-Connecting-IP: 10.9.9.9' -d '{"password":"fuerza-bruta"}' > /dev/null
+  done
+  check "tras 6 fallos desde una IP: 429 (límite de intentos)" \
+    "$(code -X POST "$BASE/api/admin/login" -H 'Content-Type: application/json' \
+        -H 'CF-Connecting-IP: 10.9.9.9' -d '{"password":"fuerza-bruta"}')" "429"
+  check "el bloqueo no afecta a otras IP" \
+    "$(code -X POST "$BASE/api/admin/login" -H 'Content-Type: application/json' \
+        -H 'CF-Connecting-IP: 10.9.9.10' -d "{\"password\":\"$PASSWORD\"}")" "200"
+else
+  printf '  \033[33m•\033[0m %s\n' \
+    "límite de intentos: se omite en producción (requiere simular IPs y Cloudflare bloquea esa cabecera)"
+fi
 check "logout borra la cookie" \
   "$(curl -s -D - -o /dev/null -b "$AJAR" -X POST "$BASE/api/admin/logout" | tr -d '\r' | grep -ci 'as_admin=;.*Max-Age=0')" "1"
 
@@ -234,8 +256,13 @@ section "7. Aforo y control de recursos"
 login
 curl -s -b "$AJAR" -X POST "$BASE/api/admin/reset" -H 'Content-Type: application/json' -d '{"keepPlayers":false}' > /dev/null
 for i in $(seq 1 60); do
-  curl -s -o /dev/null -X POST "$BASE/api/join" -H 'Content-Type: application/json' \
-    -H "CF-Connecting-IP: 203.0.113.$((i % 250 + 1))" -d "{\"n\":\"J$i\"}"
+  if [ "$IS_LOCAL" = "1" ]; then
+    curl -s -o /dev/null -X POST "$BASE/api/join" -H 'Content-Type: application/json' \
+      -H "CF-Connecting-IP: 203.0.113.$((i % 250 + 1))" -d "{\"n\":\"J$i\"}"
+  else
+    curl -s -o /dev/null -X POST "$BASE/api/join" -H 'Content-Type: application/json' \
+      -d "{\"n\":\"J$i\"}"
+  fi
 done
 check "60 personas entran sin problema" "$(curl -s "$BASE/api/state" | json total)" "60"
 check "la persona 61 es rechazada (aforo)" \

@@ -36,6 +36,9 @@ const PLAYERS = Number(readArg("players", "10"));
 const SECONDS = Number(readArg("seconds", "20"));
 const TICK_MS = Number(readArg("tick", "2000"));
 const ADMIN_TICK_MS = 3000;
+/** En local simulamos IPs con CF-Connecting-IP; en producción Cloudflare la
+ *  bloquea (403 "error code: 1000") porque es una cabecera que solo pone él. */
+const IS_LOCAL = /localhost|127\.0\.0\.1/.test(BASE);
 
 const latencies = [];
 const statuses = new Map();
@@ -144,7 +147,7 @@ async function main() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "CF-Connecting-IP": `203.0.113.${(index % 250) + 1}`,
+          ...(IS_LOCAL ? { "CF-Connecting-IP": `203.0.113.${(index % 250) + 1}` } : {}),
           "User-Agent": ua,
         },
         body: JSON.stringify({ n: name, e: "🙂" }),

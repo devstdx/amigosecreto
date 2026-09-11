@@ -15,6 +15,14 @@ BASE="${1:-http://localhost:8788}"
 # Solo valor por defecto para pruebas locales (debe coincidir con .dev.vars);
 # NO es un secreto real: en producción la contraseña es el secreto ADMIN_PASSWORD.
 PASSWORD="${ADMIN_PASSWORD:-prueba123}"
+
+# En local simulamos IPs distintas con la cabecera CF-Connecting-IP; en
+# producción Cloudflare la BLOQUEA (403, "error code: 1000") porque solo la pone
+# el propio Cloudflare, así que allí se omite y se usa la IP real del visitante.
+case "$BASE" in
+  *localhost* | *127.0.0.1*) IS_LOCAL=1 ;;
+  *) IS_LOCAL=0 ;;
+esac
 TMP="$(mktemp -d)"
 PASS=0
 FAIL=0
@@ -75,9 +83,15 @@ check "sala vacía" "$(echo "$BODY" | field total)" "0"
 
 # ------------------------------------------------------ 3. alta de 3 jugadores
 join() { # join nombre emoji ip user-agent cookie-jar
-  curl -sS -c "$5" -X POST "$BASE/api/join" -H 'Content-Type: application/json' \
-    -H "CF-Connecting-IP: $3" -H "User-Agent: $4" \
-    -d "{\"n\":\"$1\",\"e\":\"$2\"}"
+  if [ "$IS_LOCAL" = "1" ]; then
+    curl -sS -c "$5" -X POST "$BASE/api/join" -H 'Content-Type: application/json' \
+      -H "CF-Connecting-IP: $3" -H "User-Agent: $4" \
+      -d "{\"n\":\"$1\",\"e\":\"$2\"}"
+  else
+    curl -sS -c "$5" -X POST "$BASE/api/join" -H 'Content-Type: application/json' \
+      -H "User-Agent: $4" \
+      -d "{\"n\":\"$1\",\"e\":\"$2\"}"
+  fi
 }
 IPHONE="Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
 ANDROID="Mozilla/5.0 (Linux; Android 11; SM-A515F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96 Mobile Safari/537.36"
@@ -90,7 +104,7 @@ check "el emoji elegido se guarda" "$(echo "$A" | field me.e)" "😎"
 # -------------------------------------------------------- 4. estado público
 BODY="$(curl -sS "$BASE/api/state")"
 check "hay 3 personas en la sala" "$(echo "$BODY" | field total)" "3"
-check "las IP no se exponen al público" "$(echo "$BODY" | count '203\.0\.113\.7')" "0"
+check "las IP no se exponen al público" "$(echo "$BODY" | count '"ip"')" "0"
 
 # --------------------------------------------------------- 5. panel: login
 CODE="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/api/admin/login" \
@@ -101,7 +115,16 @@ check "panel sin sesión → 401" "$CODE" "401"
 
 # ---------------------------------------------------------- 6. panel: datos
 BODY="$(curl -sS -b "$TMP/admin.jar" "$BASE/api/admin/state")"
-check "el panel ve la IP real (CF-Connecting-IP)" "$(echo "$BODY" | count '203\.0\.113\.7')" "1"
+check "el panel ve la IP real del visitante" \
+  "$(echo "$BODY" | node -e '
+     let s = "";
+     process.stdin.on("data", (d) => (s += d));
+     process.stdin.on("end", () => {
+       const players = JSON.parse(s).players || [];
+       const target = players.find((p) => p.n === "Lucía") || players[0] || {};
+       const ok = typeof target.ip === "string" && /^[0-9a-fA-F:.]{7,45}$/.test(target.ip) && target.ip !== "—";
+       console.log(ok ? "si" : "no (" + target.ip + ")");
+     });')" "si"
 check "el panel reconoce el dispositivo" "$(echo "$BODY" | count 'iPhone · Safari')" "1"
 check "las 3 personas figuran en pantalla" "$(echo "$BODY" | count '"s":"online"')" "3"
 
