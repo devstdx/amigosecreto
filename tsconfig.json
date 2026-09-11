@@ -11,6 +11,6 @@
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["functions/**/*.ts"]
+  "include": ["src/**/*.ts", "functions/**/*.ts"]
 }
 

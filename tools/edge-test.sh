@@ -257,8 +257,10 @@ for asset in style.css app.js admin.js; do
   check "asset $asset disponible y con tipo correcto" \
     "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/$asset")" "200"
 done
-check "_routes.json presente (Functions solo en /api/*)" \
-  "$(code "$BASE/_routes.json")" "200"
+check "_routes.json ya NO se sirve (artefacto de Pages, sustituido por run_worker_first)" \
+  "$(code "$BASE/_routes.json")" "404"
+check "wrangler.jsonc enruta /api/* al Worker (run_worker_first)" \
+  "$(grep -c '"run_worker_first": \["/api/\*"\]' "$(dirname "$0")/../wrangler.jsonc" 2>/dev/null || echo 0)" "1"
 check "los estáticos NO se sirven desde la Function (sin cabecera de API)" \
   "$(curl -s -D - -o /dev/null "$BASE/style.css" | tr -d '\r' | grep -ci 'x-robots-tag: noindex, nofollow')" "0"
 

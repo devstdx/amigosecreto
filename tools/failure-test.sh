@@ -41,10 +41,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-wait_ready() { # wait_ready <puerto> <log> [segundos]
-  local port="$1" log="$2" limit="${3:-40}" waited=0
+wait_ready() { # wait_ready <puerto> [segundos]  ·  sondea HTTP (robusto entre versiones)
+  local port="$1" limit="${2:-60}" waited=0
   while [ "$waited" -lt "$limit" ]; do
-    if grep -q 'Ready on http' "$log" 2>/dev/null; then return 0; fi
+    if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$port/"; then return 0; fi
     sleep 1
     waited=$((waited + 1))
   done
@@ -62,14 +62,14 @@ node -e '
 BLACKHOLE_PID=$!
 sleep 1
 
-( cd "$ROOT" && WRANGLER_SEND_METRICS=false nohup "$WRANGLER" pages dev public --port "$PORT_BLACKHOLES" \
-    --binding UPSTASH_REDIS_REST_URL="http://127.0.0.1:$BLACKHOLE_PORT" \
-    --binding UPSTASH_REDIS_REST_TOKEN=irrelevante \
-    --binding ADMIN_PASSWORD=prueba123 \
-    --binding ADMIN_SECRET=secreto-de-prueba \
-    --binding TICK_MS=5000 > /tmp/wrangler-blackhole.log 2>&1 & )
+( cd "$ROOT" && WRANGLER_SEND_METRICS=false nohup "$WRANGLER" dev --port "$PORT_BLACKHOLES" \
+    --var UPSTASH_REDIS_REST_URL:"http://127.0.0.1:$BLACKHOLE_PORT" \
+    --var UPSTASH_REDIS_REST_TOKEN:irrelevante \
+    --var ADMIN_PASSWORD:prueba123 \
+    --var ADMIN_SECRET:secreto-de-prueba \
+    --var TICK_MS:5000 > /tmp/wrangler-blackhole.log 2>&1 & )
 
-if wait_ready "$PORT_BLACKHOLES" /tmp/wrangler-blackhole.log 45; then
+if wait_ready "$PORT_BLACKHOLES" 60; then
   echo "  (instancia con upstream colgado lista en :$PORT_BLACKHOLES)"
   RESULT="$(curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time 20 "http://127.0.0.1:$PORT_BLACKHOLES/api/state")"
   TIME="${RESULT##* }"
@@ -85,12 +85,12 @@ fi
 stop_port "$PORT_BLACKHOLES"
 
 # ------------------------------------------------------- 2. Upstash inalcanzable
-( cd "$ROOT" && WRANGLER_SEND_METRICS=false nohup "$WRANGLER" pages dev public --port "$PORT_NOCONFIG" \
-    --binding UPSTASH_REDIS_REST_URL="http://127.0.0.1:9" \
-    --binding UPSTASH_REDIS_REST_TOKEN=irrelevante \
-    --binding ADMIN_PASSWORD=prueba123 \
-    --binding ADMIN_SECRET=secreto-de-prueba > /tmp/wrangler-dead.log 2>&1 & )
-if wait_ready "$PORT_NOCONFIG" /tmp/wrangler-dead.log 45; then
+( cd "$ROOT" && WRANGLER_SEND_METRICS=false nohup "$WRANGLER" dev --port "$PORT_NOCONFIG" \
+    --var UPSTASH_REDIS_REST_URL:http://127.0.0.1:9 \
+    --var UPSTASH_REDIS_REST_TOKEN:irrelevante \
+    --var ADMIN_PASSWORD:prueba123 \
+    --var ADMIN_SECRET:secreto-de-prueba > /tmp/wrangler-dead.log 2>&1 & )
+if wait_ready "$PORT_NOCONFIG" 60; then
   RESULT="$(curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time 10 "http://127.0.0.1:$PORT_NOCONFIG/api/state")"
   check "puerto cerrado → 503 inmediato" "${RESULT%% *}" "503"
   check "es rápido (menos de 3 s)" \
@@ -102,8 +102,8 @@ stop_port "$PORT_NOCONFIG"
 
 # ------------------------------------------------- 3. sin variables de entorno
 if [ -f "$ROOT/.dev.vars" ]; then mv "$ROOT/.dev.vars" "$ROOT/.dev.vars.parked"; fi
-( cd "$ROOT" && WRANGLER_SEND_METRICS=false nohup "$WRANGLER" pages dev public --port "$PORT_NOCONFIG" > /tmp/wrangler-noconfig.log 2>&1 & )
-if wait_ready "$PORT_NOCONFIG" /tmp/wrangler-noconfig.log 45; then
+( cd "$ROOT" && WRANGLER_SEND_METRICS=false nohup "$WRANGLER" dev --port "$PORT_NOCONFIG" > /tmp/wrangler-noconfig.log 2>&1 & )
+if wait_ready "$PORT_NOCONFIG" 60; then
   check "sin Upstash configurado → 500 (no 503 ni traza)" \
     "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT_NOCONFIG/api/state")" "500"
   check "el mensaje explica qué falta" \

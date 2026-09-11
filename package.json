@@ -4,9 +4,10 @@
   "private": true,
   "description": "Amigo Secreto en vivo: sala única, panel de administración y despliegue en Cloudflare Pages",
   "scripts": {
-    "dev": "wrangler pages dev public",
-    "deploy": "wrangler pages deploy public",
-    "pages:create": "wrangler pages project create",
+    "dev": "wrangler dev --port 8788",
+    "deploy": "wrangler deploy",
+    "secrets": "wrangler secret bulk",
+    "deploy:pages": "wrangler pages deploy public --config wrangler.pages.toml",
     "mock": "node tools/mock-upstash.mjs",
     "test": "bash tools/smoke-test.sh && bash tools/edge-test.sh",
     "test:load": "node tools/load-test.mjs",

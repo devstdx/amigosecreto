@@ -1,0 +1,37 @@
+/**
+ * ============================================================================
+ *  Cloudflare Workers — configuración de PRODUCCIÓN
+ * ============================================================================
+ *  Un solo Worker sirve la app estática (public/) y la API (/api/*).
+ *
+ *  Despliegue:
+ *     npx wrangler login
+ *     npx wrangler secret put UPSTASH_REDIS_REST_URL      (y TOKEN, ADMIN_PASSWORD, ADMIN_SECRET)
+ *     npm run deploy                     # wrangler deploy
+ *
+ *  Local:
+ *     npm run mock &                     # Upstash de mentira con contador de comandos
+ *     npm run dev                        # http://localhost:8788  ·  /admin
+ *
+ *  Notas:
+ *   · `run_worker_first: ["/api/*"]` ⇒ solo la API invoca al Worker; el resto
+ *     de rutas se sirven como assets del CDN (sin coste de invocación).
+ *   · `_headers` y `_redirects` SÍ funcionan en Workers static assets.
+ *   · `_routes.json` era de Pages: aquí se sustituye por run_worker_first.
+ *   · No se usa `nodejs_compat`: el backend solo emplea fetch y Web Crypto.
+ * ============================================================================
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "amigosecreto",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "observability": {
+    "enabled": true
+  }
+}

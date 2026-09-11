@@ -5,6 +5,10 @@
   Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=()
   Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'
 
+# Las URLs de previsualización / *.workers.dev no deben indexarse en buscadores
+https://:version.:subdomain.workers.dev/*
+  X-Robots-Tag: noindex, nofollow
+
 /api/*
   Cache-Control: no-store
   X-Robots-Tag: noindex, nofollow

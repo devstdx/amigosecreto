@@ -13,7 +13,7 @@
  *  Uso:
  *    node tools/load-test.mjs                                   (10 personas · 20 s)
  *    node tools/load-test.mjs --players 15 --seconds 30
- *    BASE=https://amigo-secreto.pages.dev ADMIN_PASSWORD=xxx node tools/load-test.mjs
+ *    BASE=https://amigosecreto.tu-subdominio.workers.dev ADMIN_PASSWORD=xxx node tools/load-test.mjs
  * ============================================================================
  */
 

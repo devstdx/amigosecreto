@@ -4,8 +4,8 @@
 # ============================================================================
 #  Uso:
 #    1) node tools/mock-upstash.mjs &        (o una base Upstash real en .dev.vars)
-#    2) npx wrangler pages dev public --port 8788 &
-#    3) bash tools/smoke-test.sh             (o: bash tools/smoke-test.sh https://mi-sitio.pages.dev)
+#    2) npm run dev                            # wrangler dev --port 8788
+#    3) bash tools/smoke-test.sh               (o: bash tools/smoke-test.sh https://mi-worker.workers.dev)
 #
 #  Verifica: sesión persistente, IP/dispositivo, presencia, sorteo SIN
 #  auto-asignaciones, matriz de auditoría, emoji, expulsión y reinicio de ronda.

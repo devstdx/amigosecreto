@@ -1,5 +1,5 @@
 # Amigo Secreto — variables de entorno (LOCAL)
-# Copia este archivo a .dev.vars para `wrangler pages dev`.
+# Copia este archivo a .dev.vars para `wrangler dev` (Workers).
 # .dev.vars está en .gitignore: NUNCA se sube al repositorio.
 
 # --- Base de datos (Upstash Redis, plan gratuito: 500K comandos/mes) ---
